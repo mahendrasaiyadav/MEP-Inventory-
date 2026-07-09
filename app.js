@@ -160,6 +160,22 @@ async function ghSyncNow(showToast) {
       attempt++;
       try {
         const remote = await ghGetFile();
+         const remote = await ghGetFile();
+
+if (!localStorage.getItem('syncInitialized')) {
+    STATE.materials = remote.data.materials || {};
+    STATE.transactions = remote.data.transactions || [];
+    STATE.engineers = remote.data.engineers || [];
+    STATE.deletedEngineers = remote.data.deletedEngineers || [];
+    STATE.settings = remote.data.settings || {};
+
+    save();
+    localStorage.setItem('syncInitialized', 'true');
+    renderAll();
+    return;
+}
+
+mergeRemote(remote.data);
         mergeRemote(remote.data);
         recomputeUsed();
         save();
