@@ -1,9 +1,9 @@
 {
   "engineers": [],
   "deletedEngineers": [
+    "kumar",
     "sunny",
     "babu",
-    "kumar",
     "avinash"
   ],
   "transactions": [
@@ -25,6 +25,6 @@
   ],
   "settings": {
     "reorderPct": 20,
-    "updatedAt": 1783620555497
+    "updatedAt": 1783621611973
   }
 }
