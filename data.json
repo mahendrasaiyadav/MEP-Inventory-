@@ -1,15 +1,8 @@
 {
-  "engineers": [
-    {
-      "name": "Avinash",
-      "designation": "Incharge"
-    },
-    {
-      "name": "Kumar",
-      "designation": "JE"
-    }
-  ],
+  "engineers": [],
   "deletedEngineers": [
+    "avinash",
+    "kumar",
     "sunny",
     "babu"
   ],
@@ -31,6 +24,6 @@
   ],
   "settings": {
     "reorderPct": 20,
-    "updatedAt": 1783598459555
+    "updatedAt": 1783620392805
   }
 }
