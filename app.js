@@ -2,7 +2,11 @@
    MEP Material Inventory — app.js
    All data stored in localStorage. Excel loaded via SheetJS (xlsx).
    ════════════════════════════════════════════════════════════════════════════ */
+const SYNC_PROXY_URL =
+  "https://mep-sync-api.mahendrasaiyadav.workers.dev/data";
 
+const SYNC_KEY =
+  "mep-sync-8823";
 /* ── STATE ──────────────────────────────────────────────────────────────── */
 const STATE = {
   materials: {},   // { category: [ {sno,desc,spec,uom,physicalQty,used} ] }
