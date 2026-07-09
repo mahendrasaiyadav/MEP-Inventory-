@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MEP Material Inventory</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<!-- ── SIDEBAR ─────────────────────────────────────────────────────────── -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-brand">
+    <div class="brand-icon">⚙</div>
+    <div>
+      <div class="brand-name">MEP Inventory</div>
+      <div class="brand-sub">Material Management</div>
+    </div>
+  </div>
+  <nav class="sidebar-nav">
+    <a href="#" class="nav-item active" data-page="dashboard">
+      <span class="nav-icon">◈</span> Dashboard
+    </a>
+    <a href="#" class="nav-item" data-page="overview">
+      <span class="nav-icon">◉</span> Material Overview
+    </a>
+    <a href="#" class="nav-item" data-page="usage">
+      <span class="nav-icon">◎</span> Record Usage
+    </a>
+    <a href="#" class="nav-item" data-page="engineers">
+      <span class="nav-icon">◍</span> Engineer Reports
+    </a>
+    <a href="#" class="nav-item" data-page="history">
+      <span class="nav-icon">◐</span> Transaction Log
+    </a>
+    <a href="#" class="nav-item" data-page="settings">
+      <span class="nav-icon">◌</span> Settings
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="excel-load-zone" id="dropZone">
+      <div class="drop-icon">⬆</div>
+      <div class="drop-text">Drop <strong>materials.xlsx</strong> here to reload</div>
+      <input type="file" id="fileInput" accept=".xlsx,.xls" hidden />
+    </div>
+  </div>
+</aside>
+
+<!-- ── MAIN ───────────────────────────────────────────────────────────── -->
+<main class="main" id="main">
+  <div class="topbar">
+    <button class="burger" id="burger">☰</button>
+    <div class="topbar-title" id="pageTitle">Dashboard</div>
+    <div class="topbar-right">
+      <div class="badge-live" id="liveStatus">● LIVE</div>
+      <div class="topbar-date" id="topDate"></div>
+    </div>
+  </div>
+
+  <!-- ── DASHBOARD ───────────────────────────────────────────────────── -->
+  <div class="page active" id="page-dashboard">
+    <div class="page-header">
+      <h1>Dashboard</h1>
+      <p>Real-time overview of all MEP materials across categories</p>
+    </div>
+    <div class="kpi-row" id="kpiRow"></div>
+    <div class="section-grid">
+      <div class="card full-width">
+        <div class="card-head">
+          <span class="card-title">Category Stock Summary</span>
+        </div>
+        <div class="category-bars" id="categoryBars"></div>
+      </div>
+    </div>
+    <div class="section-grid two-col">
+      <div class="card">
+        <div class="card-head"><span class="card-title">⚠ Low Stock Alert</span></div>
+        <div class="alert-list" id="lowStockList"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">Recent Transactions</span></div>
+        <div class="alert-list" id="recentTxList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MATERIAL OVERVIEW ──────────────────────────────────────────── -->
+  <div class="page" id="page-overview">
+    <div class="page-header">
+      <h1>Material Overview</h1>
+      <p>Browse and search all materials by category</p>
+    </div>
+    <div class="toolbar">
+      <div class="search-wrap">
+        <span class="search-icon">⌕</span>
+        <input type="text" class="search-box" id="overviewSearch" placeholder="Search material, spec…" />
+      </div>
+      <div class="filter-chips" id="categoryFilters"></div>
+    </div>
+    <div class="table-card">
+      <table class="data-table" id="overviewTable">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Material Description</th>
+            <th>Specification</th>
+            <th>UOM</th>
+            <th class="num">Physical Stock</th>
+            <th class="num">Total Used</th>
+            <th class="num">Available</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="overviewBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── RECORD USAGE ───────────────────────────────────────────────── -->
+  <div class="page" id="page-usage">
+    <div class="page-header">
+      <h1>Record Usage</h1>
+      <p>Issue materials to engineers — stock updates instantly</p>
+    </div>
+    <div class="form-card">
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Date</label>
+          <input type="date" id="usageDate" />
+        </div>
+        <div class="form-group">
+          <label>Engineer</label>
+          <select id="usageEngineer">
+            <option value="">— Select Engineer —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Category</label>
+          <select id="usageCategory">
+            <option value="">— Select Category —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Material</label>
+          <select id="usageMaterial">
+            <option value="">— Select Category first —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Specification</label>
+          <input type="text" id="usageSpec" readonly placeholder="Auto-filled" />
+        </div>
+        <div class="form-group">
+          <label>UOM</label>
+          <input type="text" id="usageUOM" readonly placeholder="Auto-filled" />
+        </div>
+        <div class="form-group">
+          <label>Available Stock</label>
+          <input type="text" id="usageAvailable" readonly placeholder="Auto-filled" class="highlight-field" />
+        </div>
+        <div class="form-group">
+          <label>Qty Used</label>
+          <input type="number" id="usageQty" min="1" placeholder="Enter quantity" />
+        </div>
+        <div class="form-group full">
+          <label>Remarks</label>
+          <input type="text" id="usageRemarks" placeholder="Optional note…" />
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn-primary" id="submitUsage">Issue Material</button>
+        <button class="btn-ghost" id="clearUsage">Clear</button>
+      </div>
+      <div class="form-msg" id="formMsg"></div>
+    </div>
+
+    <div class="table-card" style="margin-top:24px">
+      <div class="card-head" style="padding:16px 20px">
+        <span class="card-title">Today's Issues</span>
+      </div>
+      <table class="data-table" id="todayTable">
+        <thead>
+          <tr>
+            <th>Time</th><th>Engineer</th><th>Material</th>
+            <th>Spec</th><th>UOM</th><th class="num">Qty</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody id="todayBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── ENGINEER REPORTS ───────────────────────────────────────────── -->
+  <div class="page" id="page-engineers">
+    <div class="page-header">
+      <h1>Engineer Reports</h1>
+      <p>Track material usage per engineer by month</p>
+    </div>
+    <div class="toolbar">
+      <div class="form-group inline">
+        <label>Month</label>
+        <select id="repMonth"></select>
+      </div>
+      <div class="form-group inline">
+        <label>Year</label>
+        <select id="repYear"></select>
+      </div>
+      <button class="btn-primary sm" id="applyFilter">Apply</button>
+    </div>
+    <div class="eng-cards" id="engCards"></div>
+    <div class="table-card" style="margin-top:24px">
+      <div class="card-head" style="padding:16px 20px">
+        <span class="card-title">Detailed Transactions</span>
+        <div class="card-actions">
+          <select id="repEngineer" style="font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border)">
+            <option value="">All Engineers</option>
+          </select>
+        </div>
+      </div>
+      <table class="data-table" id="repTable">
+        <thead>
+          <tr>
+            <th>Date</th><th>Engineer</th><th>Category</th>
+            <th>Material</th><th>Spec</th><th>UOM</th><th class="num">Qty</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody id="repBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── TRANSACTION LOG ────────────────────────────────────────────── -->
+  <div class="page" id="page-history">
+    <div class="page-header">
+      <h1>Transaction Log</h1>
+      <p>Complete history of all material issues</p>
+    </div>
+    <div class="toolbar">
+      <div class="search-wrap">
+        <span class="search-icon">⌕</span>
+        <input type="text" class="search-box" id="histSearch" placeholder="Search engineer, material…" />
+      </div>
+      <button class="btn-ghost sm" id="exportCSV">⬇ Export CSV</button>
+    </div>
+    <div class="table-card">
+      <table class="data-table" id="histTable">
+        <thead>
+          <tr>
+            <th>Date</th><th>Time</th><th>Engineer</th><th>Category</th>
+            <th>Material</th><th>Spec</th><th>UOM</th>
+            <th class="num">Qty</th><th class="num">Stock Before</th><th class="num">Stock After</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody id="histBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── SETTINGS ───────────────────────────────────────────────────── -->
+  <div class="page" id="page-settings">
+    <div class="page-header">
+      <h1>Settings</h1>
+      <p>Manage engineers and application data</p>
+    </div>
+    <div class="section-grid two-col">
+      <div class="card">
+        <div class="card-head"><span class="card-title">👷 Manage Engineers</span></div>
+        <div class="eng-list" id="engList"></div>
+        <div class="form-grid" style="padding:16px;gap:12px">
+          <div class="form-group full">
+            <label>Engineer Name</label>
+            <input type="text" id="newEngName" placeholder="Full name" />
+          </div>
+          <div class="form-group full">
+            <label>Designation</label>
+            <input type="text" id="newEngDesig" placeholder="e.g. MEP Engineer" />
+          </div>
+        </div>
+        <div style="padding:0 16px 16px">
+          <button class="btn-primary" id="addEngineerBtn">Add Engineer</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">📁 Load Materials from Excel</span></div>
+        <div style="padding:20px">
+          <p style="font-size:14px;color:var(--text-muted);line-height:1.6;margin-bottom:16px">
+            Upload your <strong>materials.xlsx</strong> file. Each sheet becomes a category.
+            Required columns: <code>S.No, Material Description, Specification, UOM, QTY</code>
+          </p>
+          <div class="drop-area" id="settingsDropZone">
+            <div style="font-size:32px;margin-bottom:8px">📂</div>
+            <div style="font-weight:600;margin-bottom:4px">Click to browse or drag file here</div>
+            <div style="font-size:12px;color:var(--text-muted)">Supports .xlsx and .xls</div>
+            <input type="file" id="settingsFileInput" accept=".xlsx,.xls" hidden />
+          </div>
+          <div class="load-status" id="loadStatus"></div>
+        </div>
+        <div class="card-head" style="margin-top:8px"><span class="card-title">⚙ Reorder Level</span></div>
+        <div style="padding:16px">
+          <div class="form-grid" style="gap:12px">
+            <div class="form-group">
+              <label>Default Low Stock %</label>
+              <input type="number" id="reorderPct" value="20" min="5" max="50" />
+            </div>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin-top:8px">
+            Items below this % of physical stock are flagged as low.
+          </p>
+          <button class="btn-primary" style="margin-top:12px" id="saveSettings">Save Settings</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">🗑 Danger Zone</span></div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:10px">
+          <button class="btn-danger" id="clearUsageBtn">Clear All Usage Data</button>
+          <button class="btn-danger" id="clearAllBtn">Reset Everything</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
