@@ -57,22 +57,28 @@ function recomputeUsed() {
   });
 }
 
-/* ── GITHUB SYNC — shared cross-device storage for engineers + issued data ──
-   The materials list already syncs across devices via materials.xlsx living
-   in the repo. Engineers and transactions are the parts that get entered at
-   runtime, so they're written to a JSON file in the same repo via the
-   GitHub Contents API and merged (by id / name) with whatever every other
-   device has already pushed.                                              */
-const GH_CONFIG_KEY = 'mep_gh_config';
+/* ── SYNC — shared cross-device storage for engineers + issued data ─────────
+   IMPORTANT: this app is a public static site (GitHub Pages), so it can
+   NEVER hold a real GitHub token in its own source — anyone could view the
+   page source or the repo and steal it. Instead, all devices talk to a
+   small Cloudflare Worker proxy (see /sync-worker/worker.js) which holds
+   the real GitHub token as a server-side secret and does the GitHub API
+   calls on our behalf. That means every device auto-connects with zero
+   setup, and the token itself never ships to any browser.
+
+   SYNC_PROXY_URL / SYNC_KEY below are NOT secrets — SYNC_KEY is just a
+   low-value shared key to stop random internet traffic hitting the Worker;
+   the real credential lives only in the Worker's environment variables.
+   Fill these in once after deploying the Worker (see worker.js header). */
+const SYNC_PROXY_URL = 'https://REPLACE-WITH-YOUR-WORKER-URL.workers.dev';
+const SYNC_KEY = 'REPLACE-WITH-YOUR-SYNC-KEY';
+
 let ghSyncing = false;
 let ghPollTimer = null;
 
-function ghConfig() {
-  try { return JSON.parse(localStorage.getItem(GH_CONFIG_KEY) || 'null'); }
-  catch(e) { return null; }
+function syncConfigured() {
+  return SYNC_PROXY_URL && !SYNC_PROXY_URL.includes('REPLACE-WITH');
 }
-function ghSaveConfig(cfg) { localStorage.setItem(GH_CONFIG_KEY, JSON.stringify(cfg)); }
-function ghClearConfig() { localStorage.removeItem(GH_CONFIG_KEY); }
 
 function setSyncBadge(state, text) {
   const el = document.getElementById('liveStatus');
@@ -81,44 +87,27 @@ function setSyncBadge(state, text) {
   el.textContent = text;
 }
 
-async function ghGetFile(cfg) {
-  const url = `https://api.github.com/repos/${cfg.repo}/contents/${encodeURIComponent(cfg.path)}?ref=${encodeURIComponent(cfg.branch || 'main')}&t=${Date.now()}`;
-  const res = await fetch(url, {
-    headers: { 'Authorization': `token ${cfg.token}`, 'Accept': 'application/vnd.github+json' },
+async function ghGetFile() {
+  const res = await fetch(`${SYNC_PROXY_URL}/data`, {
+    headers: { 'X-Sync-Key': SYNC_KEY },
   });
-  if (res.status === 404) return { data: null, sha: null };
-  if (!res.ok) throw new Error(`GitHub read failed (${res.status})`);
-  const json = await res.json();
-  const content = decodeURIComponent(escape(atob((json.content || '').replace(/\n/g, ''))));
-  let data = null;
-  try { data = JSON.parse(content); } catch(e) { data = null; }
-  return { data, sha: json.sha };
+  if (!res.ok) throw new Error(`Sync read failed (${res.status})`);
+  return res.json(); // { data, sha }
 }
 
-async function ghPutFile(cfg, dataObj, sha) {
-  const url = `https://api.github.com/repos/${cfg.repo}/contents/${encodeURIComponent(cfg.path)}`;
-  const body = {
-    message: `Update inventory data — ${new Date().toISOString()}`,
-    content: btoa(unescape(encodeURIComponent(JSON.stringify(dataObj, null, 2)))),
-    branch: cfg.branch || 'main',
-  };
-  if (sha) body.sha = sha;
-  const res = await fetch(url, {
+async function ghPutFile(dataObj, sha) {
+  const res = await fetch(`${SYNC_PROXY_URL}/data`, {
     method: 'PUT',
-    headers: {
-      'Authorization': `token ${cfg.token}`,
-      'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
+    headers: { 'X-Sync-Key': SYNC_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: dataObj, sha }),
   });
   if (!res.ok) {
-    const err = new Error(`GitHub write failed (${res.status})`);
+    const err = new Error(`Sync write failed (${res.status})`);
     err.status = res.status;
     throw err;
   }
   const json = await res.json();
-  return json.content.sha;
+  return json.sha;
 }
 
 // Merge remote engineers/transactions into STATE without losing local-only
@@ -160,8 +149,7 @@ function ghPayload() {
 
 // Pull remote, merge, push merged result back. Retries once on write conflict.
 async function ghSyncNow(showToast) {
-  const cfg = ghConfig();
-  if (!cfg || !cfg.repo || !cfg.token) { setSyncBadge('local', '● LOCAL ONLY'); return; }
+  if (!syncConfigured()) { setSyncBadge('local', '● LOCAL ONLY'); return; }
   if (ghSyncing) return;
   ghSyncing = true;
   setSyncBadge('syncing', '⏳ SYNCING');
@@ -171,12 +159,12 @@ async function ghSyncNow(showToast) {
     while (attempt < 2) {
       attempt++;
       try {
-        const remote = await ghGetFile(cfg);
+        const remote = await ghGetFile();
         mergeRemote(remote.data);
         recomputeUsed();
         save();
         renderAll();
-        await ghPutFile(cfg, ghPayload(), remote.sha);
+        await ghPutFile(ghPayload(), remote.sha);
         lastErr = null;
         break;
       } catch(err) {
@@ -187,12 +175,12 @@ async function ghSyncNow(showToast) {
     if (lastErr) throw lastErr;
     setSyncBadge('ok', '● LIVE');
     if (statusEl) { statusEl.textContent = `✓ Synced at ${new Date().toLocaleTimeString()}`; statusEl.className = 'load-status ok'; }
-    if (showToast) toast('Synced with GitHub ✓', 'ok');
+    if (showToast) toast('Synced ✓', 'ok');
   } catch(err) {
-    console.warn('GitHub sync error', err);
+    console.warn('Sync error', err);
     setSyncBadge('err', '✖ SYNC ERROR');
     if (statusEl) { statusEl.textContent = `Error: ${err.message}`; statusEl.className = 'load-status err'; }
-    if (showToast) toast('GitHub sync failed — check settings', 'err');
+    if (showToast) toast('Sync failed', 'err');
   } finally {
     ghSyncing = false;
   }
@@ -201,28 +189,28 @@ async function ghSyncNow(showToast) {
 // Lightweight pull-only check, used for background polling so other devices'
 // entries show up here without needing a local edit to trigger a sync.
 async function ghPollOnce() {
-  const cfg = ghConfig();
-  if (!cfg || !cfg.repo || !cfg.token || ghSyncing) return;
+  if (!syncConfigured() || ghSyncing) return;
   try {
-    const remote = await ghGetFile(cfg);
+    const remote = await ghGetFile();
     const before = JSON.stringify([STATE.engineers, STATE.transactions, STATE.deletedEngineers]);
     mergeRemote(remote.data);
     const after = JSON.stringify([STATE.engineers, STATE.transactions, STATE.deletedEngineers]);
-    if (before !== after) { recomputeUsed(); save(); renderAll(); toast('New data synced from GitHub','ok'); }
+    if (before !== after) { recomputeUsed(); save(); renderAll(); toast('New data synced','ok'); }
     setSyncBadge('ok', '● LIVE');
   } catch(err) {
     setSyncBadge('err', '✖ SYNC ERROR');
   }
 }
 
+// Sync is now fully automatic — every device that loads the site talks to
+// the same Worker proxy with no per-device setup or token entry required.
 function initGitHubSync() {
-  const cfg = ghConfig();
   clearInterval(ghPollTimer);
-  if (cfg && cfg.repo && cfg.token) {
+  if (syncConfigured()) {
     ghSyncNow(false);
     ghPollTimer = setInterval(ghPollOnce, 25000);
   } else {
-    setSyncBadge('local', '● LOCAL ONLY');
+    setSyncBadge('local', '● LOCAL ONLY (Worker not configured yet)');
   }
 }
 
@@ -878,13 +866,6 @@ function exportCSV() {
 function renderSettings() {
   document.getElementById('reorderPct').value = STATE.settings.reorderPct;
 
-  // GitHub sync fields
-  const cfg = ghConfig();
-  document.getElementById('ghRepo').value   = cfg?.repo   || '';
-  document.getElementById('ghBranch').value = cfg?.branch || 'main';
-  document.getElementById('ghPath').value   = cfg?.path   || 'data.json';
-  document.getElementById('ghToken').value  = cfg?.token  || '';
-
   // Engineer list
   document.getElementById('engList').innerHTML = STATE.engineers.length
     ? STATE.engineers.map((e,i)=>`<div class="eng-list-item">
@@ -956,7 +937,130 @@ function handleExcelUpload(file, statusId) {
   });
 }
 
-/* ── EVENT WIRING ────────────────────────────────────────────────────────── */
+/* ── ADMIN SETTINGS ──────────────────────────────────────────────────────
+   Note: this is a static, client-side site, so this password screens off
+   the panel from casual/accidental use by regular engineers — it is not
+   real security (anyone who reads the page source can find it, the same
+   way any password baked into a public static site could be found). Don't
+   rely on it to protect anything you wouldn't be OK with a technical user
+   eventually seeing.                                                     */
+const ADMIN_PASSWORD = 'MEP@LOFT45';
+let adminUnlocked = false;
+
+function initAdminPanel() {
+  const lockView   = document.getElementById('adminLocked');
+  const panelView  = document.getElementById('adminPanel');
+  const pwInput    = document.getElementById('adminPwInput');
+  const unlockBtn  = document.getElementById('adminUnlockBtn');
+  const pwMsg      = document.getElementById('adminPwMsg');
+  if (!lockView) return; // settings page not yet rendered
+
+  function refreshLockUI() {
+    lockView.style.display  = adminUnlocked ? 'none' : '';
+    panelView.style.display = adminUnlocked ? '' : 'none';
+  }
+  refreshLockUI();
+
+  function tryUnlock() {
+    if (pwInput.value === ADMIN_PASSWORD) {
+      adminUnlocked = true;
+      pwMsg.textContent = '';
+      pwInput.value = '';
+      refreshLockUI();
+    } else {
+      pwMsg.textContent = 'Incorrect password';
+      pwMsg.className = 'form-msg err';
+    }
+  }
+  unlockBtn.onclick = tryUnlock;
+  pwInput.onkeydown = e => { if (e.key === 'Enter') tryUnlock(); };
+
+  document.getElementById('adminLockBtn').onclick = () => { adminUnlocked = false; refreshLockUI(); };
+
+  // Clear ALL data — materials, transactions, engineers, settings
+  document.getElementById('adminClearAllBtn').onclick = () => {
+    if (!confirm('This permanently deletes ALL materials, transactions, and engineers on this device (and pushes the wipe to every synced device). This cannot be undone. Continue?')) return;
+    if (!confirm('Are you absolutely sure? Type OK to confirm you understand this is permanent.')) return;
+    STATE.materials = {};
+    STATE.transactions = [];
+    STATE.deletedEngineers = [...STATE.engineers.map(e=>e.name.toLowerCase()), ...STATE.deletedEngineers];
+    STATE.engineers = [];
+    STATE.settings = { reorderPct: 20, updatedAt: Date.now() };
+    save();
+    renderAll();
+    toast('All data cleared', 'ok');
+    ghSyncNow(false);
+  };
+
+  // Clear only usage/transactions — keeps materials + engineers
+  document.getElementById('adminClearTxnBtn').onclick = () => {
+    if (!confirm('Clear all recorded usage/transactions? Materials and engineers stay. This cannot be undone.')) return;
+    STATE.transactions = [];
+    recomputeUsed();
+    save();
+    renderAll();
+    toast('Transactions cleared', 'ok');
+    ghSyncNow(false);
+  };
+
+  // Export full backup as a JSON file
+  document.getElementById('adminExportBtn').onclick = () => {
+    const backup = {
+      materials: STATE.materials,
+      transactions: STATE.transactions,
+      engineers: STATE.engineers,
+      deletedEngineers: STATE.deletedEngineers,
+      settings: STATE.settings,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `mep-inventory-backup-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    toast('Backup downloaded', 'ok');
+  };
+
+  // Import/restore a previously exported backup
+  document.getElementById('adminImportInput').onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm('Restoring a backup replaces all current data on this device. Continue?')) { e.target.value=''; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const backup = JSON.parse(reader.result);
+        STATE.materials = backup.materials || {};
+        STATE.transactions = backup.transactions || [];
+        STATE.engineers = backup.engineers || [];
+        STATE.deletedEngineers = backup.deletedEngineers || [];
+        STATE.settings = backup.settings || { reorderPct: 20 };
+        recomputeUsed();
+        save();
+        renderAll();
+        toast('Backup restored ✓', 'ok');
+        ghSyncNow(false);
+      } catch (err) {
+        toast('Invalid backup file', 'err');
+      }
+      e.target.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  // Force a full resync with the server
+  document.getElementById('adminResyncBtn').onclick = () => ghSyncNow(true);
+  document.getElementById('adminImportBtn').onclick = () => document.getElementById('adminImportInput').click();
+
+  // Live sync status text inside admin panel
+  const cfgOk = syncConfigured();
+  const statusLine = document.getElementById('adminSyncStatus');
+  if (statusLine) {
+    statusLine.textContent = cfgOk
+      ? 'Cross-device sync is configured and automatic.'
+      : 'Sync proxy not configured yet — see sync-worker/worker.js. Data is local to this device only.';
+  }
+}
 document.addEventListener('DOMContentLoaded', ()=>{
   load();
 
@@ -1033,27 +1137,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
     ghSyncNow(false);
   });
 
-  // GitHub sync controls
-  document.getElementById('ghConnectBtn').addEventListener('click', ()=>{
-    const repo   = document.getElementById('ghRepo').value.trim();
-    const branch = document.getElementById('ghBranch').value.trim() || 'main';
-    const path   = document.getElementById('ghPath').value.trim() || 'data.json';
-    const token  = document.getElementById('ghToken').value.trim();
-    if (!repo || !token) { toast('Enter repo and token','err'); return; }
-    if (!/^[^\/\s]+\/[^\/\s]+$/.test(repo)) { toast('Repo must be "owner/repo"','err'); return; }
-    ghSaveConfig({ repo, branch, path, token });
-    toast('Connected — syncing…','ok');
-    initGitHubSync();
-  });
-  document.getElementById('ghSyncNowBtn').addEventListener('click', ()=> ghSyncNow(true));
-  document.getElementById('ghDisconnectBtn').addEventListener('click', ()=>{
-    ghClearConfig();
-    clearInterval(ghPollTimer);
-    setSyncBadge('local','● LOCAL ONLY');
-    document.getElementById('ghStatus').textContent = 'Disconnected — data now stored on this device only.';
-    document.getElementById('ghStatus').className = 'load-status';
-    toast('Disconnected from GitHub','ok');
-  });
+  // Sync status (fully automatic — nothing for the user to configure)
+  document.getElementById('ghSyncNowBtn')?.addEventListener('click', ()=> ghSyncNow(true));
+
+  initAdminPanel();
 
   // Initial render
   showPage('dashboard');
