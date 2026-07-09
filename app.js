@@ -8,6 +8,7 @@ const STATE = {
   materials: {},   // { category: [ {sno,desc,spec,uom,physicalQty,used} ] }
   transactions: [], // [ {id,date,time,engineer,category,desc,spec,uom,qty,stockBefore,stockAfter,remarks} ]
   engineers: [],   // [ {name,designation} ]
+  deletedEngineers: [], // [ lowercase names ] — tombstones so deletions sync across devices
   settings: { reorderPct: 20 },
 };
 
@@ -23,6 +24,7 @@ function save() {
   localStorage.setItem('mep_materials',     JSON.stringify(STATE.materials));
   localStorage.setItem('mep_transactions',  JSON.stringify(STATE.transactions));
   localStorage.setItem('mep_engineers',     JSON.stringify(STATE.engineers));
+  localStorage.setItem('mep_deleted_engineers', JSON.stringify(STATE.deletedEngineers));
   localStorage.setItem('mep_settings',      JSON.stringify(STATE.settings));
 }
 function load() {
@@ -30,12 +32,198 @@ function load() {
     const m = localStorage.getItem('mep_materials');
     const t = localStorage.getItem('mep_transactions');
     const e = localStorage.getItem('mep_engineers');
+    const de = localStorage.getItem('mep_deleted_engineers');
     const s = localStorage.getItem('mep_settings');
     if (m) STATE.materials    = JSON.parse(m);
     if (t) STATE.transactions = JSON.parse(t);
     if (e) STATE.engineers    = JSON.parse(e);
+    if (de) STATE.deletedEngineers = JSON.parse(de);
     if (s) STATE.settings     = JSON.parse(s);
   } catch(err) { console.warn('Load error', err); }
+  recomputeUsed();
+}
+
+/* ── DERIVE USAGE FROM TRANSACTIONS (single source of truth) ────────────── */
+// item.used is always recomputed from STATE.transactions so that syncing
+// engineers+transactions across devices is enough to keep stock correct
+// everywhere — no separate "used" counter needs to be merged/synced.
+function recomputeUsed() {
+  Object.values(STATE.materials).forEach(items => items.forEach(i => { i.used = 0; }));
+  STATE.transactions.forEach(t => {
+    const items = STATE.materials[t.cat];
+    if (!items) return;
+    const item = items.find(i => i.desc === t.desc && i.spec === t.spec);
+    if (item) item.used += t.qty;
+  });
+}
+
+/* ── GITHUB SYNC — shared cross-device storage for engineers + issued data ──
+   The materials list already syncs across devices via materials.xlsx living
+   in the repo. Engineers and transactions are the parts that get entered at
+   runtime, so they're written to a JSON file in the same repo via the
+   GitHub Contents API and merged (by id / name) with whatever every other
+   device has already pushed.                                              */
+const GH_CONFIG_KEY = 'mep_gh_config';
+let ghSyncing = false;
+let ghPollTimer = null;
+
+function ghConfig() {
+  try { return JSON.parse(localStorage.getItem(GH_CONFIG_KEY) || 'null'); }
+  catch(e) { return null; }
+}
+function ghSaveConfig(cfg) { localStorage.setItem(GH_CONFIG_KEY, JSON.stringify(cfg)); }
+function ghClearConfig() { localStorage.removeItem(GH_CONFIG_KEY); }
+
+function setSyncBadge(state, text) {
+  const el = document.getElementById('liveStatus');
+  if (!el) return;
+  el.className = 'badge-live' + (state === 'ok' ? '' : ' ' + state);
+  el.textContent = text;
+}
+
+async function ghGetFile(cfg) {
+  const url = `https://api.github.com/repos/${cfg.repo}/contents/${encodeURIComponent(cfg.path)}?ref=${encodeURIComponent(cfg.branch || 'main')}&t=${Date.now()}`;
+  const res = await fetch(url, {
+    headers: { 'Authorization': `token ${cfg.token}`, 'Accept': 'application/vnd.github+json' },
+  });
+  if (res.status === 404) return { data: null, sha: null };
+  if (!res.ok) throw new Error(`GitHub read failed (${res.status})`);
+  const json = await res.json();
+  const content = decodeURIComponent(escape(atob((json.content || '').replace(/\n/g, ''))));
+  let data = null;
+  try { data = JSON.parse(content); } catch(e) { data = null; }
+  return { data, sha: json.sha };
+}
+
+async function ghPutFile(cfg, dataObj, sha) {
+  const url = `https://api.github.com/repos/${cfg.repo}/contents/${encodeURIComponent(cfg.path)}`;
+  const body = {
+    message: `Update inventory data — ${new Date().toISOString()}`,
+    content: btoa(unescape(encodeURIComponent(JSON.stringify(dataObj, null, 2)))),
+    branch: cfg.branch || 'main',
+  };
+  if (sha) body.sha = sha;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `token ${cfg.token}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = new Error(`GitHub write failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  const json = await res.json();
+  return json.content.sha;
+}
+
+// Merge remote engineers/transactions into STATE without losing local-only
+// entries or resurrecting entries that were deliberately deleted.
+function mergeRemote(remote) {
+  if (!remote) return;
+
+  const delSet = new Set([...(STATE.deletedEngineers||[]), ...(remote.deletedEngineers||[])].map(n=>n.toLowerCase()));
+
+  const engMap = {};
+  STATE.engineers.forEach(e=>{ if (!delSet.has(e.name.toLowerCase())) engMap[e.name.toLowerCase()] = e; });
+  (remote.engineers||[]).forEach(e=>{
+    const k = e.name.toLowerCase();
+    if (!delSet.has(k) && !engMap[k]) engMap[k] = e;
+  });
+  STATE.engineers = Object.values(engMap);
+  STATE.deletedEngineers = Array.from(delSet);
+
+  const txMap = {};
+  STATE.transactions.forEach(t=>{ txMap[t.id] = t; });
+  (remote.transactions||[]).forEach(t=>{ if (!txMap[t.id]) txMap[t.id] = t; });
+  STATE.transactions = Object.values(txMap).sort((a,b)=>
+    (a.date+a.time).localeCompare(b.date+b.time) || a.id.localeCompare(b.id));
+
+  if (remote.settings && remote.settings.updatedAt &&
+      (!STATE.settings.updatedAt || remote.settings.updatedAt > STATE.settings.updatedAt)) {
+    STATE.settings = remote.settings;
+  }
+}
+
+function ghPayload() {
+  return {
+    engineers: STATE.engineers,
+    deletedEngineers: STATE.deletedEngineers,
+    transactions: STATE.transactions,
+    settings: { ...STATE.settings, updatedAt: STATE.settings.updatedAt || Date.now() },
+  };
+}
+
+// Pull remote, merge, push merged result back. Retries once on write conflict.
+async function ghSyncNow(showToast) {
+  const cfg = ghConfig();
+  if (!cfg || !cfg.repo || !cfg.token) { setSyncBadge('local', '● LOCAL ONLY'); return; }
+  if (ghSyncing) return;
+  ghSyncing = true;
+  setSyncBadge('syncing', '⏳ SYNCING');
+  const statusEl = document.getElementById('ghStatus');
+  try {
+    let attempt = 0, lastErr = null;
+    while (attempt < 2) {
+      attempt++;
+      try {
+        const remote = await ghGetFile(cfg);
+        mergeRemote(remote.data);
+        recomputeUsed();
+        save();
+        renderAll();
+        await ghPutFile(cfg, ghPayload(), remote.sha);
+        lastErr = null;
+        break;
+      } catch(err) {
+        lastErr = err;
+        if (err.status !== 409) break; // only retry on sha conflict
+      }
+    }
+    if (lastErr) throw lastErr;
+    setSyncBadge('ok', '● LIVE');
+    if (statusEl) { statusEl.textContent = `✓ Synced at ${new Date().toLocaleTimeString()}`; statusEl.className = 'load-status ok'; }
+    if (showToast) toast('Synced with GitHub ✓', 'ok');
+  } catch(err) {
+    console.warn('GitHub sync error', err);
+    setSyncBadge('err', '✖ SYNC ERROR');
+    if (statusEl) { statusEl.textContent = `Error: ${err.message}`; statusEl.className = 'load-status err'; }
+    if (showToast) toast('GitHub sync failed — check settings', 'err');
+  } finally {
+    ghSyncing = false;
+  }
+}
+
+// Lightweight pull-only check, used for background polling so other devices'
+// entries show up here without needing a local edit to trigger a sync.
+async function ghPollOnce() {
+  const cfg = ghConfig();
+  if (!cfg || !cfg.repo || !cfg.token || ghSyncing) return;
+  try {
+    const remote = await ghGetFile(cfg);
+    const before = JSON.stringify([STATE.engineers, STATE.transactions, STATE.deletedEngineers]);
+    mergeRemote(remote.data);
+    const after = JSON.stringify([STATE.engineers, STATE.transactions, STATE.deletedEngineers]);
+    if (before !== after) { recomputeUsed(); save(); renderAll(); toast('New data synced from GitHub','ok'); }
+    setSyncBadge('ok', '● LIVE');
+  } catch(err) {
+    setSyncBadge('err', '✖ SYNC ERROR');
+  }
+}
+
+function initGitHubSync() {
+  const cfg = ghConfig();
+  clearInterval(ghPollTimer);
+  if (cfg && cfg.repo && cfg.token) {
+    ghSyncNow(false);
+    ghPollTimer = setInterval(ghPollOnce, 25000);
+  } else {
+    setSyncBadge('local', '● LOCAL ONLY');
+  }
 }
 
 /* ── EXCEL PARSING ───────────────────────────────────────────────────────── */
@@ -80,14 +268,13 @@ function parseExcel(file, onDone) {
           const row = rows[r];
           const desc = String(row[iDesc] || '').trim();
           if (!desc) continue;
-          const existing = STATE.materials[name]?.find(m => m.desc === desc && m.spec === String(row[iSpec]||'').trim());
           items.push({
             sno:  items.length + 1,
             desc,
             spec: String(row[iSpec] || '').trim(),
             uom:  String(row[iUOM]  || '').trim(),
             physicalQty: parseFloat(row[iQty]) || 0,
-            used: existing ? existing.used : 0,
+            used: 0,
           });
         }
         if (items.length) result[name] = items;
@@ -135,6 +322,7 @@ async function tryAutoLoad() {
     });
     if (Object.keys(result).length) {
       STATE.materials = result;
+      recomputeUsed();
       save();
       renderAll();
       toast('Materials loaded from materials.xlsx ✓','ok');
@@ -233,62 +421,33 @@ function renderDashboard() {
   const stats = totalStats();
   const txToday = STATE.transactions.filter(t=>t.date===today());
 
-  // KPIs
+  // KPIs — each is clickable and jumps to the relevant place
   const kpis = [
-    { icon:'📦', value: fmt(stats.total),       label:'Total Materials', sub:`${Object.keys(STATE.materials).length} categories`, accent:'var(--accent)' },
-    { icon:'🏭', value: fmt(stats.totalPhy),    label:'Physical Stock',  sub:'Opening quantity',      accent:'#8b5cf6' },
-    { icon:'✅', value: fmt(stats.totalAvail),  label:'Available Stock', sub:`${fmt(stats.totalUsed)} issued total`, accent:'var(--green)' },
-    { icon:'⚠️', value: stats.low + stats.crit, label:'Low / Critical',  sub:`${stats.crit} critical, ${stats.low} low`, accent:'var(--red)' },
-    { icon:'📅', value: txToday.reduce((s,t)=>s+t.qty,0), label:"Today's Issues", sub:`${txToday.length} transactions`, accent:'var(--orange)' },
-    { icon:'👷', value: STATE.engineers.length, label:'Engineers',       sub:'Active team members',   accent:'#06b6d4' },
+    { icon:'📦', value: fmt(stats.total), label:'Total Materials',
+      sub:`${Object.keys(STATE.materials).length} categories`, accent:'var(--accent)',
+      nav: ()=> showPage('overview') },
+    { icon:'⚠️', value: stats.low + stats.crit, label:'Low / Critical',
+      sub:`${stats.crit} critical, ${stats.low} low`, accent:'var(--red)',
+      nav: ()=> { showPage('dashboard'); setTimeout(()=>document.getElementById('lowStockSection')?.scrollIntoView({behavior:'smooth',block:'start'}), 50); } },
+    { icon:'📅', value: txToday.reduce((s,t)=>s+t.qty,0), label:"Today's Issues",
+      sub:`${txToday.length} transactions`, accent:'var(--orange)',
+      nav: ()=> showPage('usage') },
+    { icon:'👷', value: STATE.engineers.length, label:'Engineers',
+      sub:'Active team members', accent:'#06b6d4',
+      nav: ()=> showPage('engineers') },
   ];
   document.getElementById('kpiRow').innerHTML = kpis.map(k=>`
-    <div class="kpi-card" style="--kpi-accent:${k.accent}">
+    <div class="kpi-card clickable" style="--kpi-accent:${k.accent}">
       <div class="kpi-icon">${k.icon}</div>
       <div class="kpi-value">${k.value}</div>
       <div class="kpi-label">${k.label}</div>
       <div class="kpi-sub">${k.sub}</div>
     </div>`).join('');
+  document.querySelectorAll('#kpiRow .kpi-card').forEach((card, idx)=>{
+    card.addEventListener('click', ()=> kpis[idx].nav && kpis[idx].nav());
+  });
 
-  // Category bars
-  const cats = Object.entries(STATE.materials);
-  const maxPhy = Math.max(...cats.map(([,items])=>items.reduce((s,i)=>s+i.physicalQty,0)),1);
-  document.getElementById('categoryBars').innerHTML = cats.map(([cat,items])=>{
-    const phy   = items.reduce((s,i)=>s+i.physicalQty,0);
-    const used  = items.reduce((s,i)=>s+i.used,0);
-    const avail = phy - used;
-    const pct   = Math.round((avail/Math.max(phy,1))*100);
-    const color = catColor(cat);
-    return `
-      <div>
-        <div class="cat-bar-row">
-          <div class="cat-bar-label">${cat}</div>
-          <div>
-            <div class="cat-bar-track">
-              <div class="cat-bar-fill" style="width:${pct}%;background:${color}"></div>
-            </div>
-            <div class="cat-bar-nums">${fmt(avail)} avail / ${fmt(phy)} total</div>
-          </div>
-          <div class="cat-bar-pct" style="color:${color}">${pct}%</div>
-        </div>
-      </div>`;
-  }).join('');
-
-  // Low stock list
-  const lowItems = allMaterials().filter(i=>statusOf(i)!=='ok')
-    .sort((a,b)=>available(a)-available(b)).slice(0,10);
-  document.getElementById('lowStockList').innerHTML = lowItems.length
-    ? lowItems.map(i=>{
-        const st = statusOf(i);
-        return `<div class="alert-item">
-          <div class="alert-dot ${st==='crit'?'red':'yellow'}"></div>
-          <div class="alert-main">
-            <div class="alert-name">${i.desc} <span style="color:var(--text-muted);font-size:11px">${i.spec}</span></div>
-            <div class="alert-meta">${i.cat} · ${i.uom}</div>
-          </div>
-          <div class="alert-val" style="color:${st==='crit'?'var(--red)':'var(--yellow)'}">${fmt(available(i))}</div>
-        </div>`;}).join('')
-    : `<div class="empty-state">✅ All stocks are healthy</div>`;
+  renderCatMatSummary();
 
   // Recent transactions
   const recent = [...STATE.transactions].reverse().slice(0,8);
@@ -302,6 +461,110 @@ function renderDashboard() {
         <div class="alert-val">${fmt(t.qty)} ${t.uom}</div>
       </div>`).join('')
     : `<div class="empty-state">No transactions yet</div>`;
+
+  // Low / critical stock — full list, at the bottom
+  const lowItems = allMaterials().filter(i=>statusOf(i)!=='ok')
+    .sort((a,b)=>available(a)-available(b));
+  document.getElementById('lowStockList').innerHTML = lowItems.length
+    ? lowItems.map(i=>{
+        const st = statusOf(i);
+        return `<div class="alert-item">
+          <div class="alert-dot ${st==='crit'?'red':'yellow'}"></div>
+          <div class="alert-main">
+            <div class="alert-name">${i.desc} <span style="color:var(--text-muted);font-size:11px">${i.spec}</span></div>
+            <div class="alert-meta">${i.cat} · ${i.uom}</div>
+          </div>
+          <div class="alert-val" style="color:${st==='crit'?'var(--red)':'var(--yellow)'}">${fmt(available(i))}</div>
+        </div>`;}).join('')
+    : `<div class="empty-state">✅ All stocks are healthy</div>`;
+
+  renderMonthlyUsage();
+}
+
+/* ── CATEGORY & MATERIAL SUMMARY (grouped by material description) ──────── */
+function renderCatMatSummary() {
+  const el = document.getElementById('catMatSummary');
+  const entries = Object.entries(STATE.materials);
+  if (!entries.length) { el.innerHTML = `<div class="empty-state">No materials loaded yet.</div>`; return; }
+
+  const openCats = new Set(
+    [...el.querySelectorAll('.cms-group.open')].map(g=>g.dataset.cat)
+  );
+
+  el.innerHTML = entries.map(([cat, items])=>{
+    const color   = catColor(cat);
+    const catPhy  = items.reduce((s,i)=>s+i.physicalQty,0);
+    const catUsed = items.reduce((s,i)=>s+(i.used||0),0);
+    const catAvail= Math.max(0, catPhy - catUsed);
+
+    // Group every spec-row under its Material Description
+    const byDesc = {};
+    items.forEach(i=>{
+      if (!byDesc[i.desc]) byDesc[i.desc] = { desc:i.desc, phy:0, used:0, specs:0 };
+      byDesc[i.desc].phy   += i.physicalQty;
+      byDesc[i.desc].used  += (i.used||0);
+      byDesc[i.desc].specs += 1;
+    });
+    const rows = Object.values(byDesc).sort((a,b)=>a.desc.localeCompare(b.desc));
+    const isOpen = openCats.has(cat);
+
+    return `
+      <div class="cms-group${isOpen?' open':''}" data-cat="${cat}">
+        <div class="cms-head">
+          <div class="cms-head-left">
+            <span class="cms-caret">▶</span>
+            <span class="cms-dot" style="background:${color}"></span>
+            <span class="cms-cat-name">${cat}</span>
+          </div>
+          <div class="cms-head-nums">${fmt(catAvail)} avail / ${fmt(catPhy)} total · ${rows.length} materials</div>
+        </div>
+        <div class="cms-body">
+          <div class="cms-colhead"><span>Material Description</span><span>Physical</span><span>Used</span><span>Available</span><span>Specs</span></div>
+          ${rows.map(r=>{
+            const avail = Math.max(0, r.phy - r.used);
+            return `<div class="cms-row">
+              <div class="cms-mat-name">${r.desc}</div>
+              <div class="cms-num">${fmt(r.phy)}</div>
+              <div class="cms-num">${fmt(r.used)}</div>
+              <div class="cms-num avail">${fmt(avail)}</div>
+              <div class="cms-num">${r.specs}</div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+  }).join('');
+
+  el.querySelectorAll('.cms-head').forEach(head=>{
+    head.addEventListener('click', ()=> head.closest('.cms-group').classList.toggle('open'));
+  });
+}
+
+/* ── MONTHLY USAGE ────────────────────────────────────────────────────────── */
+function renderMonthlyUsage() {
+  const el = document.getElementById('monthlyUsageBars');
+  if (!STATE.transactions.length) { el.innerHTML = `<div class="empty-state">No usage recorded yet</div>`; return; }
+
+  const map = {};
+  STATE.transactions.forEach(t=>{
+    const key = (t.date||'').slice(0,7); // YYYY-MM
+    if (!key) return;
+    map[key] = (map[key]||0) + t.qty;
+  });
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const keys = Object.keys(map).sort().slice(-12); // last 12 months with activity
+  const max  = Math.max(...keys.map(k=>map[k]), 1);
+
+  el.innerHTML = keys.map(k=>{
+    const [y,m] = k.split('-');
+    const label = `${monthNames[parseInt(m,10)-1]} ${y}`;
+    const val   = map[k];
+    const pct   = Math.round((val/max)*100);
+    return `<div class="mu-row">
+      <div class="mu-label">${label}</div>
+      <div class="mu-track"><div class="mu-fill" style="width:${pct}%"></div></div>
+      <div class="mu-val">${fmt(val)}</div>
+    </div>`;
+  }).join('');
 }
 
 /* ── OVERVIEW ─────────────────────────────────────────────────────────────── */
@@ -369,9 +632,7 @@ function updateMaterialDropdown() {
   const cat = document.getElementById('usageCategory').value;
   const matSel = document.getElementById('usageMaterial');
   matSel.innerHTML = '<option value="">— Select Material —</option>';
-  document.getElementById('usageSpec').value = '';
-  document.getElementById('usageUOM').value = '';
-  document.getElementById('usageAvailable').value = '';
+  resetSpecDropdown('— Select Material first —');
   if (!cat || !STATE.materials[cat]) return;
   const unique = {};
   STATE.materials[cat].forEach(item=>{
@@ -384,17 +645,48 @@ function updateMaterialDropdown() {
   });
 }
 
-function updateSpecFromMaterial() {
+function resetSpecDropdown(placeholder) {
+  const specSel = document.getElementById('usageSpec');
+  specSel.innerHTML = `<option value="">${placeholder}</option>`;
+  document.getElementById('usageUOM').value = '';
+  document.getElementById('usageAvailable').value = '';
+}
+
+// A material with a blank specification would otherwise share the same
+// (empty) option value as the "please select" placeholder — use a sentinel
+// so it's still a distinct, selectable choice.
+const SPEC_NONE = '__NONE__';
+function specEncode(spec) { return spec === '' ? SPEC_NONE : spec; }
+function specDecode(val)  { return val === SPEC_NONE ? '' : val; }
+
+// Material Description chosen → only show the Specifications that belong to
+// that material name, so the engineer explicitly picks the right one.
+function updateSpecDropdown() {
   const cat  = document.getElementById('usageCategory').value;
   const desc = document.getElementById('usageMaterial').value;
-  document.getElementById('usageSpec').value = '';
+  resetSpecDropdown('— Select Specification —');
+  if (!cat || !desc || !STATE.materials[cat]) return;
+  const specs = STATE.materials[cat].filter(i=>i.desc===desc);
+  const specSel = document.getElementById('usageSpec');
+  specs.forEach(item=>{
+    const opt = document.createElement('option');
+    opt.value = specEncode(item.spec);
+    opt.textContent = item.spec ? `${item.spec}  (${fmt(available(item))} ${item.uom} avail)` : `— No spec —  (${fmt(available(item))} ${item.uom} avail)`;
+    specSel.appendChild(opt);
+  });
+}
+
+// Specification chosen → auto-fill the read-only UOM / Available Stock fields
+function updateUOMAvailFromSpec() {
+  const cat  = document.getElementById('usageCategory').value;
+  const desc = document.getElementById('usageMaterial').value;
+  const spec = specDecode(document.getElementById('usageSpec').value);
   document.getElementById('usageUOM').value = '';
   document.getElementById('usageAvailable').value = '';
   if (!cat || !desc || !STATE.materials[cat]) return;
-  const item = STATE.materials[cat].find(i=>i.desc===desc);
+  const item = STATE.materials[cat].find(i=>i.desc===desc && i.spec===spec);
   if (!item) return;
-  document.getElementById('usageSpec').value = item.spec || '';
-  document.getElementById('usageUOM').value  = item.uom  || '';
+  document.getElementById('usageUOM').value = item.uom || '';
   document.getElementById('usageAvailable').value = fmt(available(item));
 }
 
@@ -403,7 +695,8 @@ function submitUsage() {
   const eng    = document.getElementById('usageEngineer').value;
   const cat    = document.getElementById('usageCategory').value;
   const desc   = document.getElementById('usageMaterial').value;
-  const spec   = document.getElementById('usageSpec').value;
+  const specRaw= document.getElementById('usageSpec').value;
+  const spec   = specDecode(specRaw);
   const uom    = document.getElementById('usageUOM').value;
   const qtyStr = document.getElementById('usageQty').value;
   const rem    = document.getElementById('usageRemarks').value.trim();
@@ -413,13 +706,14 @@ function submitUsage() {
   if (!eng)    { msg.textContent='Please select an engineer.';  msg.className='form-msg err'; return; }
   if (!cat)    { msg.textContent='Please select a category.';   msg.className='form-msg err'; return; }
   if (!desc)   { msg.textContent='Please select a material.';   msg.className='form-msg err'; return; }
+  if (!specRaw) { msg.textContent='Please select a specification.'; msg.className='form-msg err'; return; }
   const qty = parseFloat(qtyStr);
   if (!qty || qty <= 0) { msg.textContent='Enter a valid quantity > 0.'; msg.className='form-msg err'; return; }
 
   // Find item and deduct
   const items = STATE.materials[cat];
-  const idx   = items.findIndex(i=>i.desc===desc);
-  if (idx === -1) { msg.textContent='Material not found.'; msg.className='form-msg err'; return; }
+  const idx   = items.findIndex(i=>i.desc===desc && i.spec===spec);
+  if (idx === -1) { msg.textContent='Material / specification not found.'; msg.className='form-msg err'; return; }
   const item = items[idx];
   const avail = available(item);
   if (qty > avail) {
@@ -428,8 +722,7 @@ function submitUsage() {
   }
 
   const stockBefore = avail;
-  item.used = (item.used || 0) + qty;
-  const stockAfter  = available(item);
+  const stockAfter  = avail - qty;
 
   STATE.transactions.push({
     id: uid(), date, time: nowTime(),
@@ -437,6 +730,7 @@ function submitUsage() {
     stockBefore, stockAfter, remarks: rem,
   });
 
+  recomputeUsed();
   save();
   msg.textContent = `✓ Issued ${fmt(qty)} ${uom} of ${desc} to ${eng}`;
   msg.className = 'form-msg ok';
@@ -447,6 +741,8 @@ function submitUsage() {
   renderTodayTable();
   toast(`Issued ${fmt(qty)} ${uom} · ${desc}`, 'ok');
   setTimeout(()=>{ msg.textContent=''; msg.className='form-msg'; }, 4000);
+
+  ghSyncNow(false); // push the new transaction to GitHub so other devices see it
 }
 
 function renderTodayTable() {
@@ -582,6 +878,13 @@ function exportCSV() {
 function renderSettings() {
   document.getElementById('reorderPct').value = STATE.settings.reorderPct;
 
+  // GitHub sync fields
+  const cfg = ghConfig();
+  document.getElementById('ghRepo').value   = cfg?.repo   || '';
+  document.getElementById('ghBranch').value = cfg?.branch || 'main';
+  document.getElementById('ghPath').value   = cfg?.path   || 'data.json';
+  document.getElementById('ghToken').value  = cfg?.token  || '';
+
   // Engineer list
   document.getElementById('engList').innerHTML = STATE.engineers.length
     ? STATE.engineers.map((e,i)=>`<div class="eng-list-item">
@@ -594,9 +897,15 @@ function renderSettings() {
   document.querySelectorAll('.eng-del').forEach(btn=>{
     btn.addEventListener('click',()=>{
       const idx = parseInt(btn.dataset.idx);
+      const removed = STATE.engineers[idx];
       STATE.engineers.splice(idx,1);
+      if (removed) {
+        const key = removed.name.toLowerCase();
+        if (!STATE.deletedEngineers.includes(key)) STATE.deletedEngineers.push(key);
+      }
       save(); renderSettings();
       toast('Engineer removed');
+      ghSyncNow(false);
     });
   });
 
@@ -615,10 +924,13 @@ function addEngineer() {
     toast('Engineer already exists','err'); return;
   }
   STATE.engineers.push({ name, designation: desig });
+  // if this name was previously deleted, un-delete it
+  STATE.deletedEngineers = STATE.deletedEngineers.filter(n=>n!==name.toLowerCase());
   save(); renderSettings();
   document.getElementById('newEngName').value='';
   document.getElementById('newEngDesig').value='';
   toast(`${name} added ✓`,'ok');
+  ghSyncNow(false);
 }
 
 function handleExcelUpload(file, statusId) {
@@ -632,15 +944,8 @@ function handleExcelUpload(file, statusId) {
       toast('Failed to parse Excel','err');
       return;
     }
-    // Preserve usage data for matching items
-    Object.entries(result).forEach(([cat, items])=>{
-      const existing = STATE.materials[cat] || [];
-      items.forEach(item=>{
-        const ex = existing.find(e=>e.desc===item.desc && e.spec===item.spec);
-        if (ex) item.used = ex.used;
-      });
-    });
     STATE.materials = result;
+    recomputeUsed(); // usage is always derived from STATE.transactions
     save();
     const cats = Object.keys(result).length;
     const total = Object.values(result).reduce((s,a)=>s+a.length,0);
@@ -698,14 +1003,14 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('overviewSearch').addEventListener('input', filterOverview);
 
   // Usage form
-  document.getElementById('usageCategory').addEventListener('change', ()=>{
-    updateMaterialDropdown();
-  });
-  document.getElementById('usageMaterial').addEventListener('change', updateSpecFromMaterial);
+  document.getElementById('usageCategory').addEventListener('change', updateMaterialDropdown);
+  document.getElementById('usageMaterial').addEventListener('change', updateSpecDropdown);
+  document.getElementById('usageSpec').addEventListener('change', updateUOMAvailFromSpec);
   document.getElementById('submitUsage').addEventListener('click', submitUsage);
   document.getElementById('clearUsage').addEventListener('click', ()=>{
     ['usageEngineer','usageCategory','usageMaterial'].forEach(id=>document.getElementById(id).value='');
-    ['usageSpec','usageUOM','usageAvailable','usageQty','usageRemarks'].forEach(id=>document.getElementById(id).value='');
+    resetSpecDropdown('— Select Material first —');
+    ['usageQty','usageRemarks'].forEach(id=>document.getElementById(id).value='');
     document.getElementById('formMsg').textContent='';
   });
 
@@ -723,25 +1028,36 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
   document.getElementById('saveSettings').addEventListener('click', ()=>{
     STATE.settings.reorderPct = parseInt(document.getElementById('reorderPct').value) || 20;
-    save(); toast('Settings saved ✓','ok');
+    STATE.settings.updatedAt = Date.now();
+    save(); renderAll(); toast('Settings saved ✓','ok');
+    ghSyncNow(false);
   });
 
-  document.getElementById('clearUsageBtn').addEventListener('click', ()=>{
-    if (!confirm('Clear ALL usage data and restore physical stock? This cannot be undone.')) return;
-    STATE.transactions = [];
-    Object.values(STATE.materials).forEach(items=>items.forEach(i=>{ i.used=0; }));
-    save(); renderAll(); toast('Usage data cleared','ok');
+  // GitHub sync controls
+  document.getElementById('ghConnectBtn').addEventListener('click', ()=>{
+    const repo   = document.getElementById('ghRepo').value.trim();
+    const branch = document.getElementById('ghBranch').value.trim() || 'main';
+    const path   = document.getElementById('ghPath').value.trim() || 'data.json';
+    const token  = document.getElementById('ghToken').value.trim();
+    if (!repo || !token) { toast('Enter repo and token','err'); return; }
+    if (!/^[^\/\s]+\/[^\/\s]+$/.test(repo)) { toast('Repo must be "owner/repo"','err'); return; }
+    ghSaveConfig({ repo, branch, path, token });
+    toast('Connected — syncing…','ok');
+    initGitHubSync();
   });
-
-  document.getElementById('clearAllBtn').addEventListener('click', ()=>{
-    if (!confirm('Reset EVERYTHING including materials and engineers? This cannot be undone.')) return;
-    STATE.materials={}; STATE.transactions=[];;
-    save(); renderAll(); toast('All data reset','ok');
+  document.getElementById('ghSyncNowBtn').addEventListener('click', ()=> ghSyncNow(true));
+  document.getElementById('ghDisconnectBtn').addEventListener('click', ()=>{
+    ghClearConfig();
+    clearInterval(ghPollTimer);
+    setSyncBadge('local','● LOCAL ONLY');
+    document.getElementById('ghStatus').textContent = 'Disconnected — data now stored on this device only.';
+    document.getElementById('ghStatus').className = 'load-status';
+    toast('Disconnected from GitHub','ok');
   });
 
   // Initial render
   showPage('dashboard');
 
-  // Auto-load Excel from repo
-  tryAutoLoad();
+  // Auto-load Excel from repo, then connect to GitHub data sync (if configured)
+  tryAutoLoad().finally(()=> initGitHubSync());
 });

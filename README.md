@@ -54,22 +54,43 @@ A full-featured web application for managing MEP/HVAC materials, tracking engine
 
 ## 🔄 How It Works
 
-1. **Auto-loads** `materials.xlsx` on first visit
-2. All data (stock levels, usage, engineers) stored in **browser localStorage**
-3. Stock deducts automatically when you record usage
-4. Push a new `materials.xlsx` to GitHub → users get the updated material list on next load
+1. **Auto-loads** `materials.xlsx` on first visit (this is your shared material master, versioned in Git)
+2. Everything is cached in **browser localStorage** for instant offline use…
+3. …and, if you connect **GitHub Sync** (see below), engineers and issued-material transactions are also written to a JSON file in your repo, so every device pulls the same data
+4. Stock deducts automatically when you record usage (always recalculated from the transaction log, never a separate counter, so it can't drift between devices)
+5. Push a new `materials.xlsx` to GitHub → users get the updated material list on next load
+
+## 🌐 Cross-Device Sync (GitHub)
+
+Go to **Settings → 🔗 Data Sync (GitHub)** and enter:
+
+| Field | Example |
+|---|---|
+| Owner / Repository | `yourusername/your-repo` |
+| Branch | `main` |
+| Data File Path | `data.json` |
+| Personal Access Token | a token with **Contents: Read & write** on that repo |
+
+Click **Save & Connect**. From then on:
+- Adding an engineer or issuing material pushes the change to `data.json` in your repo
+- The app also polls every ~25s so entries made on *other* devices appear here automatically
+- The topbar badge shows sync status: `● LIVE` (synced), `⏳ SYNCING`, `● LOCAL ONLY` (not connected), `✖ SYNC ERROR`
+- Deleting an engineer is tracked so it doesn't reappear after syncing with a device that hasn't deleted it yet
+
+Each device/browser stores its own token locally — it's never sent anywhere except directly to `api.github.com`.
 
 ## 📱 Features
 
-- **Dashboard** — KPIs, category stock bars, low-stock alerts, recent transactions
+- **Dashboard** — KPIs (click any card to jump to that section), category → material summary (drill into any category to see per-material totals), recent transactions, full low/critical stock list, monthly usage
 - **Material Overview** — Search and filter all materials with live stock status
-- **Record Usage** — Issue materials to engineers with stock validation
+- **Record Usage** — Select Category → Material → **Specification** (filtered to that material only) → issue, with stock validation
 - **Engineer Reports** — Monthly usage per engineer with transaction detail
 - **Transaction Log** — Complete history with CSV export
-- **Settings** — Add/remove engineers, adjust reorder threshold
+- **Settings** — Add/remove engineers, adjust reorder threshold, connect GitHub sync
 
 ## 🔑 Notes
 
-- Usage data is stored **per browser** in localStorage
-- For team use: consider a backend (Supabase, Firebase) — see extended version
+- Materials list (`materials.xlsx`) is shared via Git the same way as before
+- Engineers + issued transactions are shared via Git too, once GitHub Sync is connected (see above)
+- Without GitHub Sync connected, data stays local to that browser only
 - Password: `mep2024` (for Excel file protection only)

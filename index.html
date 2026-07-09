@@ -68,19 +68,27 @@
     <div class="section-grid">
       <div class="card full-width">
         <div class="card-head">
-          <span class="card-title">Category Stock Summary</span>
+          <span class="card-title">Category &amp; Material Summary</span>
         </div>
-        <div class="category-bars" id="categoryBars"></div>
+        <div class="cat-mat-summary" id="catMatSummary"></div>
       </div>
     </div>
-    <div class="section-grid two-col">
-      <div class="card">
-        <div class="card-head"><span class="card-title">⚠ Low Stock Alert</span></div>
-        <div class="alert-list" id="lowStockList"></div>
-      </div>
-      <div class="card">
+    <div class="section-grid">
+      <div class="card full-width">
         <div class="card-head"><span class="card-title">Recent Transactions</span></div>
         <div class="alert-list" id="recentTxList"></div>
+      </div>
+    </div>
+    <div class="section-grid" id="lowStockSection">
+      <div class="card full-width">
+        <div class="card-head"><span class="card-title">⚠ Low / Critical Stock</span></div>
+        <div class="alert-list" id="lowStockList"></div>
+      </div>
+    </div>
+    <div class="section-grid" id="monthlyUsageSection">
+      <div class="card full-width">
+        <div class="card-head"><span class="card-title">📅 Monthly Usage</span></div>
+        <div class="category-bars" id="monthlyUsageBars"></div>
       </div>
     </div>
   </div>
@@ -149,7 +157,9 @@
         </div>
         <div class="form-group">
           <label>Specification</label>
-          <input type="text" id="usageSpec" readonly placeholder="Auto-filled" />
+          <select id="usageSpec">
+            <option value="">— Select Material first —</option>
+          </select>
         </div>
         <div class="form-group">
           <label>UOM</label>
@@ -213,7 +223,7 @@
       <div class="card-head" style="padding:16px 20px">
         <span class="card-title">Detailed Transactions</span>
         <div class="card-actions">
-          <select id="repEngineer" style="font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border)">
+          <select id="repEngineer" class="rep-engineer-select">
             <option value="">All Engineers</option>
           </select>
         </div>
@@ -311,10 +321,37 @@
         </div>
       </div>
       <div class="card">
-        <div class="card-head"><span class="card-title">🗑 Danger Zone</span></div>
-        <div style="padding:16px;display:flex;flex-direction:column;gap:10px">
-          <button class="btn-danger" id="clearUsageBtn">Clear All Usage Data</button>
-          <button class="btn-danger" id="clearAllBtn">Reset Everything</button>
+        <div class="card-head"><span class="card-title">🔗 Data Sync (GitHub)</span></div>
+        <div style="padding:16px">
+          <p style="font-size:13px;color:var(--text-muted);line-height:1.6;margin-bottom:14px">
+            Connect a GitHub repo to store engineers &amp; issued-material data.
+            Every device connected to the same repo will see the same data.
+            Token needs <code>repo</code> (Contents) read/write access.
+          </p>
+          <div class="form-grid" style="gap:12px">
+            <div class="form-group full">
+              <label>Owner / Repository</label>
+              <input type="text" id="ghRepo" placeholder="yourusername/your-repo" />
+            </div>
+            <div class="form-group">
+              <label>Branch</label>
+              <input type="text" id="ghBranch" placeholder="main" />
+            </div>
+            <div class="form-group">
+              <label>Data File Path</label>
+              <input type="text" id="ghPath" placeholder="data.json" />
+            </div>
+            <div class="form-group full">
+              <label>Personal Access Token</label>
+              <input type="password" id="ghToken" placeholder="ghp_xxxxxxxxxxxxxxxx" />
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+            <button class="btn-primary" id="ghConnectBtn">Save &amp; Connect</button>
+            <button class="btn-ghost" id="ghSyncNowBtn">Sync Now</button>
+            <button class="btn-ghost" id="ghDisconnectBtn">Disconnect</button>
+          </div>
+          <div class="load-status" id="ghStatus"></div>
         </div>
       </div>
     </div>
