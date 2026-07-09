@@ -160,7 +160,6 @@ async function ghSyncNow(showToast) {
       attempt++;
       try {
         const remote = await ghGetFile();
-         const remote = await ghGetFile();
 
 if (!localStorage.getItem('syncInitialized')) {
     STATE.materials = remote.data.materials || {};
