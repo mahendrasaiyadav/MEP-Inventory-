@@ -2,11 +2,7 @@
    MEP Material Inventory — app.js
    All data stored in localStorage. Excel loaded via SheetJS (xlsx).
    ════════════════════════════════════════════════════════════════════════════ */
-const SYNC_PROXY_URL =
-  "https://mep-sync-api.mahendrasaiyadav.workers.dev/data";
 
-const SYNC_KEY =
-  "mep-sync-8823";
 /* ── STATE ──────────────────────────────────────────────────────────────── */
 const STATE = {
   materials: {},   // { category: [ {sno,desc,spec,uom,physicalQty,used} ] }
@@ -74,8 +70,8 @@ function recomputeUsed() {
    low-value shared key to stop random internet traffic hitting the Worker;
    the real credential lives only in the Worker's environment variables.
    Fill these in once after deploying the Worker (see worker.js header). */
-const SYNC_PROXY_URL = 'https://REPLACE-WITH-YOUR-WORKER-URL.workers.dev';
-const SYNC_KEY = 'REPLACE-WITH-YOUR-SYNC-KEY';
+const SYNC_PROXY_URL = 'https://mep-sync-api.mahendrasaiyadav.workers.dev/data';
+const SYNC_KEY = 'mep-sync-8823';
 
 let ghSyncing = false;
 let ghPollTimer = null;
