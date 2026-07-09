@@ -57,7 +57,6 @@ function recomputeUsed() {
     if (item) item.used += t.qty;
   });
 }
-
 /* ── SYNC — shared cross-device storage for engineers + issued data ─────────
    IMPORTANT: this app is a public static site (GitHub Pages), so it can
    NEVER hold a real GitHub token in its own source — anyone could view the
