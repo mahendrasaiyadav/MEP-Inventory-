@@ -129,8 +129,9 @@ function mergeRemote(remote) {
   const txMap = {};
   STATE.transactions.forEach(t=>{ txMap[t.id] = t; });
   (remote.transactions||[]).forEach(t=>{ if (!txMap[t.id]) txMap[t.id] = t; });
-  STATE.transactions = Object.values(txMap).sort((a,b)=>
-    (a.date+a.time).localeCompare(b.date+b.time) || a.id.localeCompare(b.id));
+STATE.transactions = Object.values(txMap).sort((a,b)=>
+(`${a.date||''}${a.time||''}`).localeCompare(`${b.date||''}${b.time||''}`) ||
+String(a.id||'').localeCompare(String(b.id||'')));
 
   if (remote.settings && remote.settings.updatedAt &&
       (!STATE.settings.updatedAt || remote.settings.updatedAt > STATE.settings.updatedAt)) {
