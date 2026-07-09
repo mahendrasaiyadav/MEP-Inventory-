@@ -6,7 +6,23 @@
     "babu",
     "avinash"
   ],
-  "transactions": [],
+  "transactions": [
+    {},
+    {
+      "id": "mrdh4mxo378o",
+      "date": "2026-07-09",
+      "time": "17:49",
+      "engineer": "Avinash",
+      "cat": "MS",
+      "desc": "MS Nipple",
+      "spec": "25mm, 4\"Length",
+      "uom": "NO'S",
+      "qty": 2,
+      "stockBefore": 8,
+      "stockAfter": 6,
+      "remarks": ""
+    }
+  ],
   "settings": {
     "reorderPct": 20,
     "updatedAt": 1783621611973
