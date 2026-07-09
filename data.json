@@ -1,10 +1,10 @@
 {
   "engineers": [],
   "deletedEngineers": [
-    "avinash",
-    "kumar",
     "sunny",
-    "babu"
+    "babu",
+    "avinash",
+    "kumar"
   ],
   "transactions": [
     {
