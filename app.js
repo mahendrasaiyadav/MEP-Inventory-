@@ -489,6 +489,9 @@ function renderCatMatSummary() {
   const openCats = new Set(
     [...el.querySelectorAll('.cms-group.open')].map(g=>g.dataset.cat)
   );
+  const openMats = new Set(
+    [...el.querySelectorAll('.cms-row.open')].map(r=>r.dataset.cat+'||'+decodeURIComponent(r.dataset.desc))
+  );
 
   el.innerHTML = entries.map(([cat, items])=>{
     const color   = catColor(cat);
@@ -518,23 +521,34 @@ function renderCatMatSummary() {
           <div class="cms-head-nums">${fmt(catAvail)} avail / ${fmt(catPhy)} total · ${rows.length} materials</div>
         </div>
         <div class="cms-body">
-          <div class="cms-colhead"><span>Material Description</span><span>Physical</span><span>Used</span><span>Available</span><span>Specification</span></div>
+          <div class="cms-colhead"><span>Material Description</span><span>Physical</span><span>Used</span><span>Available</span><span>Specs</span></div>
           ${rows.map(r=>{
-            const avail = Math.max(0, r.phy - r.used);
-            const specOptions = r.specs.map(s=>`<option value="${specEncode(s.spec)}">${s.spec ? s.spec : '— No spec —'} (${fmt(available(s))} ${s.uom} avail)</option>`).join('');
-            return `<div class="cms-row" data-desc="${encodeURIComponent(r.desc)}" data-cat="${cat}">
-              <div class="cms-mat-name">${r.desc}</div>
-              <div class="cms-num">${fmt(r.phy)}</div>
-              <div class="cms-num">${fmt(r.used)}</div>
-              <div class="cms-num avail">${fmt(avail)}</div>
-              <div class="cms-spec-select-wrap">
-                <select class="cms-spec-select">
-                  <option value="">All specs (${r.specs.length})</option>
-                  ${specOptions}
-                </select>
+            const avail  = Math.max(0, r.phy - r.used);
+            const matKey = cat+'||'+r.desc;
+            const matOpen= openMats.has(matKey);
+            const specRows = r.specs.slice().sort((a,b)=>(a.spec||'').localeCompare(b.spec||'')).map(s=>{
+              const sAvail = available(s);
+              return `<div class="cms-spec-row">
+                <div class="cms-spec-name">${s.spec ? s.spec : '— No spec —'}</div>
+                <div class="cms-num">${fmt(s.physicalQty)}</div>
+                <div class="cms-num">${fmt(s.used||0)}</div>
+                <div class="cms-num avail">${fmt(sAvail)}</div>
+                <div class="cms-num">${s.uom||''}</div>
+              </div>`;
+            }).join('');
+            return `<div class="cms-row${matOpen?' open':''}" data-cat="${cat}" data-desc="${encodeURIComponent(r.desc)}">
+              <div class="cms-row-main">
+                <div class="cms-mat-name"><span class="cms-mat-caret">▶</span>${r.desc}</div>
+                <div class="cms-num">${fmt(r.phy)}</div>
+                <div class="cms-num">${fmt(r.used)}</div>
+                <div class="cms-num avail">${fmt(avail)}</div>
+                <div class="cms-num">${r.specs.length}</div>
               </div>
-            </div>
-            <div class="cms-spec-detail" style="display:none"></div>`;
+              <div class="cms-spec-list">
+                <div class="cms-spec-colhead"><span>Specification</span><span>Physical</span><span>Used</span><span>Available</span><span>UOM</span></div>
+                ${specRows}
+              </div>
+            </div>`;
           }).join('')}
         </div>
       </div>`;
@@ -544,30 +558,10 @@ function renderCatMatSummary() {
     head.addEventListener('click', ()=> head.closest('.cms-group').classList.toggle('open'));
   });
 
-  // Selecting a specification shows that spec's own physical / used / available
-  // just under its row, without navigating away from the dashboard.
-  el.querySelectorAll('.cms-spec-select').forEach(sel=>{
-    sel.addEventListener('click', e=> e.stopPropagation());
-    sel.addEventListener('change', e=>{
-      e.stopPropagation();
-      const row    = sel.closest('.cms-row');
-      const detail = row.nextElementSibling;
-      const cat    = row.dataset.cat;
-      const desc   = decodeURIComponent(row.dataset.desc);
-      const specVal= sel.value;
-      if (!specVal) { detail.style.display = 'none'; detail.innerHTML = ''; return; }
-      const spec = specDecode(specVal);
-      const item = (STATE.materials[cat]||[]).find(i=>i.desc===desc && i.spec===spec);
-      if (!item) { detail.style.display = 'none'; detail.innerHTML = ''; return; }
-      const av = available(item);
-      detail.innerHTML = `
-        <span class="cms-spec-detail-label">${item.spec ? item.spec : '— No spec —'}</span>
-        <span class="cms-num">${fmt(item.physicalQty)}</span>
-        <span class="cms-num">${fmt(item.used||0)}</span>
-        <span class="cms-num avail">${fmt(av)}</span>
-        <span class="cms-num">${item.uom||''}</span>`;
-      detail.style.display = 'grid';
-    });
+  // Clicking a material row expands it in place to show every specification
+  // that belongs to that Material Description, with its own stock figures.
+  el.querySelectorAll('.cms-row-main').forEach(main=>{
+    main.addEventListener('click', ()=> main.closest('.cms-row').classList.toggle('open'));
   });
 }
 
