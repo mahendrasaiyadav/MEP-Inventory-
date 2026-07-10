@@ -34,6 +34,9 @@
     <a href="#" class="nav-item" data-page="history">
       <span class="nav-icon">◐</span> Transaction Log
     </a>
+    <a href="#" class="nav-item" data-page="usageOverview">
+      <span class="nav-icon">◑</span> Usage Overview
+    </a>
     <a href="#" class="nav-item" data-page="settings">
       <span class="nav-icon">◌</span> Settings
     </a>
@@ -87,7 +90,13 @@
     </div>
     <div class="section-grid" id="monthlyUsageSection">
       <div class="card full-width">
-        <div class="card-head"><span class="card-title">📅 Monthly Usage</span></div>
+        <div class="card-head">
+          <span class="card-title">📅 Monthly Usage</span>
+          <div class="mu-filters">
+            <select id="muCategoryFilter"><option value="">All Categories</option></select>
+            <select id="muEngineerFilter"><option value="">All Engineers</option></select>
+          </div>
+        </div>
         <div class="category-bars" id="monthlyUsageBars"></div>
       </div>
     </div>
@@ -263,6 +272,43 @@
           </tr>
         </thead>
         <tbody id="histBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── USAGE OVERVIEW ─────────────────────────────────────────────── -->
+  <div class="page" id="page-usageOverview">
+    <div class="page-header">
+      <h1>Usage Overview</h1>
+      <p>Every material issued — filter by date range, engineer, or material</p>
+    </div>
+    <div class="toolbar uo-toolbar">
+      <div class="uo-presets" id="uoPresets">
+        <span class="chip active" data-range="all">All Time</span>
+        <span class="chip" data-range="week">Last Week</span>
+        <span class="chip" data-range="month">Last Month</span>
+        <span class="chip" data-range="3months">Last 3 Months</span>
+        <span class="chip" data-range="custom">Custom</span>
+      </div>
+      <div class="uo-custom-dates" id="uoCustomDates" style="display:none;">
+        <input type="date" id="uoFromDate" />
+        <span>to</span>
+        <input type="date" id="uoToDate" />
+      </div>
+      <select id="uoEngineerFilter"><option value="">All Engineers</option></select>
+      <select id="uoMaterialFilter"><option value="">All Materials</option></select>
+    </div>
+    <div class="uo-summary" id="uoSummary"></div>
+    <div class="table-card">
+      <table class="data-table" id="uoTable">
+        <thead>
+          <tr>
+            <th>Date</th><th>Time</th><th>Engineer</th><th>Category</th>
+            <th>Material</th><th>Spec</th><th>UOM</th>
+            <th class="num">Qty</th><th>Remarks</th>
+          </tr>
+        </thead>
+        <tbody id="uoBody"></tbody>
       </table>
     </div>
   </div>

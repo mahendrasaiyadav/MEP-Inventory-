@@ -388,7 +388,7 @@ function totalStats() {
 const pageTitles = {
   dashboard:'Dashboard', overview:'Material Overview',
   usage:'Record Usage', engineers:'Engineer Reports',
-  history:'Transaction Log', settings:'Settings',
+  history:'Transaction Log', usageOverview:'Usage Overview', settings:'Settings',
 };
 let currentPage = 'dashboard';
 
@@ -410,6 +410,7 @@ function renderPage(page) {
   if (page === 'usage')      renderUsagePage();
   if (page === 'engineers')  renderEngineers();
   if (page === 'history')    renderHistory();
+  if (page === 'usageOverview') renderUsageOverview();
   if (page === 'settings')   renderSettings();
 }
 
@@ -566,16 +567,45 @@ function renderCatMatSummary() {
 }
 
 /* ── MONTHLY USAGE ────────────────────────────────────────────────────────── */
-function renderMonthlyUsage() {
-  const el = document.getElementById('monthlyUsageBars');
-  if (!STATE.transactions.length) { el.innerHTML = `<div class="empty-state">No usage recorded yet</div>`; return; }
+function populateMonthlyUsageFilters() {
+  const catSel = document.getElementById('muCategoryFilter');
+  const engSel = document.getElementById('muEngineerFilter');
+  if (catSel && catSel.options.length <= 1) {
+    Object.keys(STATE.materials).forEach(c=>{
+      const o = document.createElement('option'); o.value = c; o.textContent = c; catSel.appendChild(o);
+    });
+  }
+  if (engSel && engSel.options.length <= 1) {
+    STATE.engineers.forEach(e=>{
+      const o = document.createElement('option'); o.value = e.name; o.textContent = e.name; engSel.appendChild(o);
+    });
+  }
+}
 
-  const map = {};
-  STATE.transactions.forEach(t=>{
+const openMonths = new Set();
+function renderMonthlyUsage() {
+  populateMonthlyUsageFilters();
+  const el = document.getElementById('monthlyUsageBars');
+  const catFilter = document.getElementById('muCategoryFilter')?.value || '';
+  const engFilter = document.getElementById('muEngineerFilter')?.value || '';
+
+  const filtered = STATE.transactions.filter(t=>
+    (!catFilter || t.cat === catFilter) && (!engFilter || t.engineer === engFilter)
+  );
+  if (!filtered.length) { el.innerHTML = `<div class="empty-state">No usage recorded yet</div>`; return; }
+
+  const map = {};      // key -> total qty
+  const byMonth = {};  // key -> { "desc||spec": {desc,spec,uom,qty} }
+  filtered.forEach(t=>{
     const key = (t.date||'').slice(0,7); // YYYY-MM
     if (!key) return;
     map[key] = (map[key]||0) + t.qty;
+    if (!byMonth[key]) byMonth[key] = {};
+    const mk = t.desc+'||'+(t.spec||'');
+    if (!byMonth[key][mk]) byMonth[key][mk] = { desc:t.desc, spec:t.spec, uom:t.uom, qty:0 };
+    byMonth[key][mk].qty += t.qty;
   });
+
   const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const keys = Object.keys(map).sort().slice(-12); // last 12 months with activity
   const max  = Math.max(...keys.map(k=>map[k]), 1);
@@ -585,12 +615,35 @@ function renderMonthlyUsage() {
     const label = `${monthNames[parseInt(m,10)-1]} ${y}`;
     const val   = map[k];
     const pct   = Math.round((val/max)*100);
-    return `<div class="mu-row">
-      <div class="mu-label">${label}</div>
-      <div class="mu-track"><div class="mu-fill" style="width:${pct}%"></div></div>
-      <div class="mu-val">${fmt(val)}</div>
+    const isOpen = openMonths.has(k);
+    const materials = Object.values(byMonth[k]).sort((a,b)=>b.qty-a.qty);
+    return `<div class="mu-group${isOpen?' open':''}" data-month="${k}">
+      <div class="mu-row">
+        <span class="mu-caret">▶</span>
+        <div class="mu-label">${label}</div>
+        <div class="mu-track"><div class="mu-fill" style="width:${pct}%"></div></div>
+        <div class="mu-val">${fmt(val)}</div>
+      </div>
+      <div class="mu-materials">
+        <div class="mu-mat-colhead"><span>Material</span><span>Specification</span><span>UOM</span><span>Qty Used</span></div>
+        ${materials.map(mrow=>`<div class="mu-mat-row">
+          <div>${mrow.desc}</div>
+          <div style="color:var(--text-muted)">${mrow.spec||'—'}</div>
+          <div>${mrow.uom||''}</div>
+          <div class="num"><strong>${fmt(mrow.qty)}</strong></div>
+        </div>`).join('')}
+      </div>
     </div>`;
   }).join('');
+
+  el.querySelectorAll('.mu-row').forEach(row=>{
+    row.addEventListener('click', ()=>{
+      const group = row.closest('.mu-group');
+      const k = group.dataset.month;
+      group.classList.toggle('open');
+      if (group.classList.contains('open')) openMonths.add(k); else openMonths.delete(k);
+    });
+  });
 }
 
 /* ── OVERVIEW ─────────────────────────────────────────────────────────────── */
@@ -897,6 +950,80 @@ function exportCSV() {
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = `mep-transactions-${today()}.csv`;
   a.click();
+}
+
+/* ── USAGE OVERVIEW ───────────────────────────────────────────────────────── */
+let uoRange = 'all';
+function populateUsageOverviewFilters() {
+  const engSel = document.getElementById('uoEngineerFilter');
+  const matSel = document.getElementById('uoMaterialFilter');
+  if (engSel && engSel.options.length <= 1) {
+    STATE.engineers.forEach(e=>{
+      const o = document.createElement('option'); o.value = e.name; o.textContent = e.name; engSel.appendChild(o);
+    });
+  }
+  if (matSel && matSel.options.length <= 1) {
+    const descs = new Set();
+    Object.values(STATE.materials).forEach(items=>items.forEach(i=>descs.add(i.desc)));
+    [...descs].sort().forEach(d=>{
+      const o = document.createElement('option'); o.value = d; o.textContent = d; matSel.appendChild(o);
+    });
+  }
+}
+
+function usageOverviewDateRange() {
+  const now = new Date();
+  let from = null, to = null;
+  if (uoRange === 'week')        { from = new Date(now); from.setDate(now.getDate() - 7); }
+  else if (uoRange === 'month')  { from = new Date(now); from.setMonth(now.getMonth() - 1); }
+  else if (uoRange === '3months'){ from = new Date(now); from.setMonth(now.getMonth() - 3); }
+  else if (uoRange === 'custom') {
+    const f = document.getElementById('uoFromDate').value;
+    const t = document.getElementById('uoToDate').value;
+    from = f ? new Date(f) : null;
+    to   = t ? new Date(t) : null;
+  }
+  return { from, to };
+}
+
+function renderUsageOverview() {
+  populateUsageOverviewFilters();
+  filterUsageOverview();
+}
+
+function filterUsageOverview() {
+  const engFilter = document.getElementById('uoEngineerFilter').value;
+  const matFilter = document.getElementById('uoMaterialFilter').value;
+  const { from, to } = usageOverviewDateRange();
+
+  const tx = [...STATE.transactions].reverse().filter(t=>{
+    if (engFilter && t.engineer !== engFilter) return false;
+    if (matFilter && t.desc !== matFilter) return false;
+    if (from || to) {
+      const d = new Date(t.date);
+      if (from && d < from) return false;
+      if (to) { const toEnd = new Date(to); toEnd.setHours(23,59,59,999); if (d > toEnd) return false; }
+    }
+    return true;
+  });
+
+  const totalQty = tx.reduce((s,t)=>s+t.qty, 0);
+  document.getElementById('uoSummary').innerHTML =
+    `<strong>${tx.length}</strong> transaction${tx.length===1?'':'s'} · <strong>${fmt(totalQty)}</strong> total qty issued`;
+
+  document.getElementById('uoBody').innerHTML = tx.length
+    ? tx.map(t=>`<tr>
+        <td>${fmtDate(t.date)}</td>
+        <td style="color:var(--text-muted)">${t.time}</td>
+        <td><strong>${t.engineer}</strong></td>
+        <td><span class="cat-tag">${t.cat}</span></td>
+        <td>${t.desc}</td>
+        <td style="color:var(--text-muted)">${t.spec||'—'}</td>
+        <td>${t.uom}</td>
+        <td class="num"><strong>${fmt(t.qty)}</strong></td>
+        <td style="color:var(--text-muted)">${t.remarks||'—'}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="9" class="empty-state">No transactions match these filters</td></tr>`;
 }
 
 /* ── SETTINGS ─────────────────────────────────────────────────────────────── */
@@ -1229,6 +1356,25 @@ document.addEventListener('DOMContentLoaded', ()=>{
   // History
   document.getElementById('histSearch').addEventListener('input', filterHistory);
   document.getElementById('exportCSV').addEventListener('click', exportCSV);
+
+  // Monthly Usage filters
+  document.getElementById('muCategoryFilter').addEventListener('change', renderMonthlyUsage);
+  document.getElementById('muEngineerFilter').addEventListener('change', renderMonthlyUsage);
+
+  // Usage Overview filters
+  document.querySelectorAll('#uoPresets .chip').forEach(chip=>{
+    chip.addEventListener('click', ()=>{
+      document.querySelectorAll('#uoPresets .chip').forEach(c=>c.classList.remove('active'));
+      chip.classList.add('active');
+      uoRange = chip.dataset.range;
+      document.getElementById('uoCustomDates').style.display = uoRange === 'custom' ? 'flex' : 'none';
+      filterUsageOverview();
+    });
+  });
+  document.getElementById('uoFromDate').addEventListener('change', filterUsageOverview);
+  document.getElementById('uoToDate').addEventListener('change', filterUsageOverview);
+  document.getElementById('uoEngineerFilter').addEventListener('change', filterUsageOverview);
+  document.getElementById('uoMaterialFilter').addEventListener('change', filterUsageOverview);
 
   // Settings
   document.getElementById('addEngineerBtn').addEventListener('click', addEngineer);
