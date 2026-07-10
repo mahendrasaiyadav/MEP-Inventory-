@@ -742,10 +742,6 @@ function submitUsage() {
   if (idx === -1) { msg.textContent='Material / specification not found.'; msg.className='form-msg err'; return; }
   const item = items[idx];
   const avail = available(item);
-  if (qty > avail) {
-    msg.textContent=`Only ${fmt(avail)} ${uom} available. Cannot issue ${fmt(qty)}.`;
-    msg.className='form-msg err'; return;
-  }
 
   const stockBefore = avail;
   const stockAfter  = avail - qty;
