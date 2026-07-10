@@ -499,10 +499,10 @@ function renderCatMatSummary() {
     // Group every spec-row under its Material Description
     const byDesc = {};
     items.forEach(i=>{
-      if (!byDesc[i.desc]) byDesc[i.desc] = { desc:i.desc, phy:0, used:0, specs:0 };
+      if (!byDesc[i.desc]) byDesc[i.desc] = { desc:i.desc, phy:0, used:0, specs:[] };
       byDesc[i.desc].phy   += i.physicalQty;
       byDesc[i.desc].used  += (i.used||0);
-      byDesc[i.desc].specs += 1;
+      byDesc[i.desc].specs.push(i);
     });
     const rows = Object.values(byDesc).sort((a,b)=>a.desc.localeCompare(b.desc));
     const isOpen = openCats.has(cat);
@@ -518,16 +518,23 @@ function renderCatMatSummary() {
           <div class="cms-head-nums">${fmt(catAvail)} avail / ${fmt(catPhy)} total · ${rows.length} materials</div>
         </div>
         <div class="cms-body">
-          <div class="cms-colhead"><span>Material Description</span><span>Physical</span><span>Used</span><span>Available</span><span>Specs</span></div>
+          <div class="cms-colhead"><span>Material Description</span><span>Physical</span><span>Used</span><span>Available</span><span>Specification</span></div>
           ${rows.map(r=>{
             const avail = Math.max(0, r.phy - r.used);
-            return `<div class="cms-row">
+            const specOptions = r.specs.map(s=>`<option value="${specEncode(s.spec)}">${s.spec ? s.spec : '— No spec —'} (${fmt(available(s))} ${s.uom} avail)</option>`).join('');
+            return `<div class="cms-row" data-desc="${encodeURIComponent(r.desc)}" data-cat="${cat}">
               <div class="cms-mat-name">${r.desc}</div>
               <div class="cms-num">${fmt(r.phy)}</div>
               <div class="cms-num">${fmt(r.used)}</div>
               <div class="cms-num avail">${fmt(avail)}</div>
-              <div class="cms-num">${r.specs}</div>
-            </div>`;
+              <div class="cms-spec-select-wrap">
+                <select class="cms-spec-select">
+                  <option value="">All specs (${r.specs.length})</option>
+                  ${specOptions}
+                </select>
+              </div>
+            </div>
+            <div class="cms-spec-detail" style="display:none"></div>`;
           }).join('')}
         </div>
       </div>`;
@@ -535,6 +542,32 @@ function renderCatMatSummary() {
 
   el.querySelectorAll('.cms-head').forEach(head=>{
     head.addEventListener('click', ()=> head.closest('.cms-group').classList.toggle('open'));
+  });
+
+  // Selecting a specification shows that spec's own physical / used / available
+  // just under its row, without navigating away from the dashboard.
+  el.querySelectorAll('.cms-spec-select').forEach(sel=>{
+    sel.addEventListener('click', e=> e.stopPropagation());
+    sel.addEventListener('change', e=>{
+      e.stopPropagation();
+      const row    = sel.closest('.cms-row');
+      const detail = row.nextElementSibling;
+      const cat    = row.dataset.cat;
+      const desc   = decodeURIComponent(row.dataset.desc);
+      const specVal= sel.value;
+      if (!specVal) { detail.style.display = 'none'; detail.innerHTML = ''; return; }
+      const spec = specDecode(specVal);
+      const item = (STATE.materials[cat]||[]).find(i=>i.desc===desc && i.spec===spec);
+      if (!item) { detail.style.display = 'none'; detail.innerHTML = ''; return; }
+      const av = available(item);
+      detail.innerHTML = `
+        <span class="cms-spec-detail-label">${item.spec ? item.spec : '— No spec —'}</span>
+        <span class="cms-num">${fmt(item.physicalQty)}</span>
+        <span class="cms-num">${fmt(item.used||0)}</span>
+        <span class="cms-num avail">${fmt(av)}</span>
+        <span class="cms-num">${item.uom||''}</span>`;
+      detail.style.display = 'grid';
+    });
   });
 }
 
