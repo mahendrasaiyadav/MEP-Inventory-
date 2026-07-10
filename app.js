@@ -147,7 +147,49 @@ function ghPayload() {
   };
 }
 
+// Pull remote, merge into local state, RENDER — but never write back.
+// Used for page load and background polling so simply opening/viewing the
+// app can never modify data.json. Only explicit user actions (recording
+// usage, adding/removing an engineer, saving settings, admin actions) push
+// changes — see ghSyncNow below.
+async function ghPullOnly(showToast) {
+  if (!syncConfigured()) { setSyncBadge('local', '● LOCAL ONLY'); return; }
+  if (ghSyncing) return;
+  ghSyncing = true;
+  setSyncBadge('syncing', '⏳ SYNCING');
+  const statusEl = document.getElementById('ghStatus');
+  try {
+    const remote = await ghGetFile();
+    mergeRemote(remote.data);
+    recomputeUsed();
+    save();
+    renderAll();
+    setSyncBadge('ok', '● LIVE');
+    if (statusEl) { statusEl.textContent = `✓ Loaded from server at ${new Date().toLocaleTimeString()}`; statusEl.className = 'load-status ok'; }
+    if (showToast) toast('Loaded latest data ✓', 'ok');
+  } catch (err) {
+    console.warn('Pull error', err);
+    setSyncBadge('err', '✖ SYNC ERROR');
+    if (statusEl) { statusEl.textContent = `Error: ${err.message}`; statusEl.className = 'load-status err'; }
+    if (showToast) toast('Could not load latest data', 'err');
+  } finally {
+    ghSyncing = false;
+  }
+}
+
 // Pull remote, merge, push merged result back. Retries once on write conflict.
+// Only ever called from an actual user action (add engineer, record usage,
+// save settings, admin tools) — never from page load or background polling.
+async function ghArchiveRemote(path) {
+  const res = await fetch(`${SYNC_PROXY_URL}/archive`, {
+    method: 'POST',
+    headers: { 'X-Sync-Key': SYNC_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(path ? { path } : {}),
+  });
+  if (!res.ok) throw new Error(`Archive failed (${res.status})`);
+  return res.json(); // { archivedPath, sha }
+}
+
 async function ghSyncNow(showToast) {
   if (!syncConfigured()) {
     setSyncBadge('local', '● LOCAL ONLY');
@@ -169,24 +211,6 @@ async function ghSyncNow(showToast) {
 
       try {
         const remote = await ghGetFile();
-
-        // Force every device to reload from data.json once
-        if (localStorage.getItem('appVersion') !== '2') {
-          localStorage.clear();
-
-          STATE.materials = remote.data.materials || {};
-          STATE.transactions = remote.data.transactions || [];
-          STATE.engineers = remote.data.engineers || [];
-          STATE.deletedEngineers = remote.data.deletedEngineers || [];
-          STATE.settings = remote.data.settings || {};
-
-          save();
-          localStorage.setItem('appVersion', '2');
-          renderAll();
-
-          lastErr = null;
-          break;
-        }
 
         mergeRemote(remote.data);
         recomputeUsed();
@@ -249,12 +273,15 @@ async function ghPollOnce() {
   }
 }
 
-// Sync is now fully automatic — every device that loads the site talks to
-// the same Worker proxy with no per-device setup or token entry required.
+// Sync is fully automatic — every device that loads the site talks to the
+// same Worker proxy with no per-device setup or token entry required.
+// Loading the page and polling are READ-ONLY (see ghPullOnly) — data.json
+// is only ever written when a real action happens (recording usage,
+// adding/removing an engineer, saving settings) or via Admin Settings.
 function initGitHubSync() {
   clearInterval(ghPollTimer);
   if (syncConfigured()) {
-    ghSyncNow(false);
+    ghPullOnly(false);
     ghPollTimer = setInterval(ghPollOnce, 25000);
   } else {
     setSyncBadge('local', '● LOCAL ONLY (Worker not configured yet)');
@@ -1024,10 +1051,26 @@ function initAdminPanel() {
 
   document.getElementById('adminLockBtn').onclick = () => { adminUnlocked = false; refreshLockUI(); };
 
-  // Clear ALL data — materials, transactions, engineers, settings
-  document.getElementById('adminClearAllBtn').onclick = () => {
-    if (!confirm('This permanently deletes ALL materials, transactions, and engineers on this device (and pushes the wipe to every synced device). This cannot be undone. Continue?')) return;
-    if (!confirm('Are you absolutely sure? Type OK to confirm you understand this is permanent.')) return;
+  // Clear ALL data — materials, transactions, engineers, settings.
+  // This is the ONLY action in the whole app allowed to wipe/overwrite
+  // data.json outright. It first archives the current contents to a new,
+  // separately-named file in the repo (archive/data-cleared-<timestamp>.json)
+  // so nothing is ever lost, then writes the cleared state.
+  document.getElementById('adminClearAllBtn').onclick = async () => {
+    if (!confirm('This permanently deletes ALL materials, transactions, and engineers on this device (and every synced device). The current data will be archived to a separate backup file first. Continue?')) return;
+    if (!confirm('Are you absolutely sure? This cannot be undone.')) return;
+
+    let archivedPath = null;
+    try {
+      if (syncConfigured()) {
+        toast('Archiving current data…', 'ok');
+        const archiveRes = await ghArchiveRemote();
+        archivedPath = archiveRes.archivedPath;
+      }
+    } catch (err) {
+      if (!confirm(`Could not archive current data first (${err.message}). Continue clearing anyway without a backup?`)) return;
+    }
+
     STATE.materials = {};
     STATE.transactions = [];
     STATE.deletedEngineers = [...STATE.engineers.map(e=>e.name.toLowerCase()), ...STATE.deletedEngineers];
@@ -1035,19 +1078,49 @@ function initAdminPanel() {
     STATE.settings = { reorderPct: 20, updatedAt: Date.now() };
     save();
     renderAll();
-    toast('All data cleared', 'ok');
-    ghSyncNow(false);
+
+    try {
+      if (syncConfigured()) {
+        const remote = await ghGetFile(); // latest sha, to safely overwrite
+        await ghPutFile(ghPayload(), remote.sha);
+      }
+      toast(archivedPath ? `All data cleared — backup saved to ${archivedPath} ✓` : 'All data cleared ✓', 'ok');
+    } catch (err) {
+      toast('Data cleared locally, but failed to push to server: ' + err.message, 'err');
+    }
   };
 
   // Clear only usage/transactions — keeps materials + engineers
-  document.getElementById('adminClearTxnBtn').onclick = () => {
+  document.getElementById('adminClearTxnBtn').onclick = async () => {
     if (!confirm('Clear all recorded usage/transactions? Materials and engineers stay. This cannot be undone.')) return;
+
+    let archivedPath = null;
+    try {
+      if (syncConfigured()) {
+        toast('Archiving current data…', 'ok');
+        const archiveRes = await ghArchiveRemote();
+        archivedPath = archiveRes.archivedPath;
+      }
+    } catch (err) {
+      if (!confirm(`Could not archive current data first (${err.message}). Continue clearing anyway without a backup?`)) return;
+    }
+
     STATE.transactions = [];
     recomputeUsed();
     save();
     renderAll();
-    toast('Transactions cleared', 'ok');
-    ghSyncNow(false);
+
+    try {
+      if (syncConfigured()) {
+        // Direct overwrite (no merge) — merging here would pull the old
+        // transactions straight back from the server and undo the clear.
+        const remote = await ghGetFile();
+        await ghPutFile(ghPayload(), remote.sha);
+      }
+      toast(archivedPath ? `Transactions cleared — backup saved to ${archivedPath} ✓` : 'Transactions cleared ✓', 'ok');
+    } catch (err) {
+      toast('Cleared locally, but failed to push to server: ' + err.message, 'err');
+    }
   };
 
   // Export full backup as a JSON file
@@ -1095,8 +1168,8 @@ function initAdminPanel() {
     reader.readAsText(file);
   };
 
-  // Force a full resync with the server
-  document.getElementById('adminResyncBtn').onclick = () => ghSyncNow(true);
+  // Force a fresh pull from the server (read-only — does not write data.json)
+  document.getElementById('adminResyncBtn').onclick = () => ghPullOnly(true);
   document.getElementById('adminImportBtn').onclick = () => document.getElementById('adminImportInput').click();
 
   // Live sync status text inside admin panel
@@ -1185,7 +1258,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
   });
 
   // Sync status (fully automatic — nothing for the user to configure)
-  document.getElementById('ghSyncNowBtn')?.addEventListener('click', ()=> ghSyncNow(true));
+  document.getElementById('ghSyncNowBtn')?.addEventListener('click', ()=> ghPullOnly(true));
 
   initAdminPanel();
 
