@@ -149,66 +149,85 @@ function ghPayload() {
 
 // Pull remote, merge, push merged result back. Retries once on write conflict.
 async function ghSyncNow(showToast) {
-  if (!syncConfigured()) { setSyncBadge('local', '● LOCAL ONLY'); return; }
+  if (!syncConfigured()) {
+    setSyncBadge('local', '● LOCAL ONLY');
+    return;
+  }
+
   if (ghSyncing) return;
   ghSyncing = true;
   setSyncBadge('syncing', '⏳ SYNCING');
+
   const statusEl = document.getElementById('ghStatus');
+
   try {
-    let attempt = 0, lastErr = null;
+    let attempt = 0;
+    let lastErr = null;
+
     while (attempt < 2) {
       attempt++;
+
       try {
         const remote = await ghGetFile();
-         if (localStorage.getItem('appVersion') !== '2') {
-    localStorage.clear();
 
-    STATE.materials = remote.data.materials || {};
-    STATE.transactions = remote.data.transactions || [];
-    STATE.engineers = remote.data.engineers || [];
-    STATE.deletedEngineers = remote.data.deletedEngineers || [];
-    STATE.settings = remote.data.settings || {};
+        // Force every device to reload from data.json once
+        if (localStorage.getItem('appVersion') !== '2') {
+          localStorage.clear();
 
-    save();
-    localStorage.setItem('appVersion', '2');
-    renderAll();
-    return;
-}
-if (!localStorage.getItem('syncInitialized')) {
-    STATE.materials = remote.data.materials || {};
-    STATE.transactions = remote.data.transactions || [];
-    STATE.engineers = remote.data.engineers || [];
-    STATE.deletedEngineers = remote.data.deletedEngineers || [];
-    STATE.settings = remote.data.settings || {};
+          STATE.materials = remote.data.materials || {};
+          STATE.transactions = remote.data.transactions || [];
+          STATE.engineers = remote.data.engineers || [];
+          STATE.deletedEngineers = remote.data.deletedEngineers || [];
+          STATE.settings = remote.data.settings || {};
 
-    save();
-    localStorage.setItem('syncInitialized', 'true');
-    renderAll();
-    return;
-}
+          save();
+          localStorage.setItem('appVersion', '2');
+          renderAll();
 
-mergeRemote(remote.data);
+          lastErr = null;
+          break;
+        }
+
         mergeRemote(remote.data);
         recomputeUsed();
         save();
         renderAll();
+
         await ghPutFile(ghPayload(), remote.sha);
+
         lastErr = null;
         break;
-      } catch(err) {
+
+      } catch (err) {
         lastErr = err;
-        if (err.status !== 409) break; // only retry on sha conflict
+        if (err.status !== 409) break;
       }
     }
+
     if (lastErr) throw lastErr;
+
     setSyncBadge('ok', '● LIVE');
-    if (statusEl) { statusEl.textContent = `✓ Synced at ${new Date().toLocaleTimeString()}`; statusEl.className = 'load-status ok'; }
+
+    if (statusEl) {
+      statusEl.textContent =
+        `✓ Synced at ${new Date().toLocaleTimeString()}`;
+      statusEl.className = 'load-status ok';
+    }
+
     if (showToast) toast('Synced ✓', 'ok');
-  } catch(err) {
+
+  } catch (err) {
     console.warn('Sync error', err);
+
     setSyncBadge('err', '✖ SYNC ERROR');
-    if (statusEl) { statusEl.textContent = `Error: ${err.message}`; statusEl.className = 'load-status err'; }
+
+    if (statusEl) {
+      statusEl.textContent = `Error: ${err.message}`;
+      statusEl.className = 'load-status err';
+    }
+
     if (showToast) toast('Sync failed', 'err');
+
   } finally {
     ghSyncing = false;
   }
