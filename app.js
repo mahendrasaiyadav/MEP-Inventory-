@@ -330,7 +330,7 @@ async function tryAutoLoad() {
 }
 
 /* ── HELPERS ──────────────────────────────────────────────────────────────── */
-function available(item) { return Math.max(0, item.physicalQty - item.used); }
+function available(item) { return item.physicalQty - item.used; }
 function statusOf(item) {
   const avail = available(item);
   const pct   = item.physicalQty > 0 ? (avail / item.physicalQty) * 100 : 0;
