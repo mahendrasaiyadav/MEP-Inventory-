@@ -9,7 +9,6 @@ const STATE = {
   materials: {},   // { category: [ {sno,desc,spec,uom,physicalQty,used} ] }
   transactions: [], // [ {id,date,time,engineer,category,desc,spec,uom,qty,stockBefore,stockAfter,remarks} ]
   engineers: [],   // [ {name,designation} ]
-  deletedEngineers: [], // [ lowercase names ] — tombstones so deletions sync across devices
   settings: { reorderPct: 20 },
 };
 
@@ -25,7 +24,6 @@ function save() {
   localStorage.setItem('mep_materials',     JSON.stringify(STATE.materials));
   localStorage.setItem('mep_transactions',  JSON.stringify(STATE.transactions));
   localStorage.setItem('mep_engineers',     JSON.stringify(STATE.engineers));
-  localStorage.setItem('mep_deleted_engineers', JSON.stringify(STATE.deletedEngineers));
   localStorage.setItem('mep_settings',      JSON.stringify(STATE.settings));
 }
 function load() {
@@ -33,12 +31,10 @@ function load() {
     const m = localStorage.getItem('mep_materials');
     const t = localStorage.getItem('mep_transactions');
     const e = localStorage.getItem('mep_engineers');
-    const de = localStorage.getItem('mep_deleted_engineers');
     const s = localStorage.getItem('mep_settings');
     if (m) STATE.materials    = JSON.parse(m);
     if (t) STATE.transactions = JSON.parse(t);
     if (e) STATE.engineers    = JSON.parse(e);
-    if (de) STATE.deletedEngineers = JSON.parse(de);
     if (s) STATE.settings     = JSON.parse(s);
   } catch(err) { console.warn('Load error', err); }
   recomputeUsed();
@@ -57,23 +53,22 @@ function recomputeUsed() {
     if (item) item.used += t.qty;
   });
 }
-/* ── SYNC — shared cross-device storage for engineers + issued data ─────────
-   IMPORTANT: this app is a public static site (GitHub Pages), so it can
-   NEVER hold a real GitHub token in its own source — anyone could view the
-   page source or the repo and steal it. Instead, all devices talk to a
-   small Cloudflare Worker proxy (see /sync-worker/worker.js) which holds
-   the real GitHub token as a server-side secret and does the GitHub API
-   calls on our behalf. That means every device auto-connects with zero
-   setup, and the token itself never ships to any browser.
+/* ── SYNC — real shared database via Cloudflare (D1 + R2) ───────────────────
+   No GitHub involved. Each engineer and each transaction is its own row in
+   a Cloudflare D1 database, written directly through the Worker — there is
+   no "download the whole file, merge, re-upload" step, so one device's
+   write can never silently undo another device's write (this is what was
+   causing added engineers to vanish after sync). Materials live in
+   Cloudflare R2 as files, also independent of GitHub — see
+   sync-worker/worker.js.
 
-   SYNC_PROXY_URL / SYNC_KEY below are NOT secrets — SYNC_KEY is just a
-   low-value shared key to stop random internet traffic hitting the Worker;
-   the real credential lives only in the Worker's environment variables.
-   Fill these in once after deploying the Worker (see worker.js header). */
-
+   SYNC_PROXY_URL / SYNC_KEY are NOT secrets — SYNC_KEY is just a low-value
+   shared key to keep random internet traffic off the Worker; the real
+   database/bucket credentials live only in Cloudflare's own bindings. */
 
 let ghSyncing = false;
 let ghPollTimer = null;
+let lastMaterialsVersion = -1;
 
 function syncConfigured() {
   return SYNC_PROXY_URL && !SYNC_PROXY_URL.includes('REPLACE-WITH');
@@ -86,72 +81,82 @@ function setSyncBadge(state, text) {
   el.textContent = text;
 }
 
-async function ghGetFile() {
-  const res = await fetch(`${SYNC_PROXY_URL}/data`, {
-    headers: { 'X-Sync-Key': SYNC_KEY },
-  });
+function syncHeaders(extra) {
+  return { 'X-Sync-Key': SYNC_KEY, ...(extra || {}) };
+}
+
+// GET /state — engineers, transactions, settings, materialsVersion in one call.
+async function fetchState() {
+  const res = await fetch(`${SYNC_PROXY_URL}/state`, { headers: syncHeaders() });
   if (!res.ok) throw new Error(`Sync read failed (${res.status})`);
-  return res.json(); // { data, sha }
+  return res.json();
 }
 
-async function ghPutFile(dataObj, sha) {
-  const res = await fetch(`${SYNC_PROXY_URL}/data`, {
-    method: 'PUT',
-    headers: { 'X-Sync-Key': SYNC_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: dataObj, sha }),
-  });
-  if (!res.ok) {
-    const err = new Error(`Sync write failed (${res.status})`);
-    err.status = res.status;
-    throw err;
-  }
+// GET /materials — the current materials list (from R2).
+async function fetchMaterials() {
+  const res = await fetch(`${SYNC_PROXY_URL}/materials`, { headers: syncHeaders() });
+  if (!res.ok) throw new Error(`Materials read failed (${res.status})`);
   const json = await res.json();
-  return json.sha;
+  return json.materials || {};
 }
 
-// Merge remote engineers/transactions into STATE without losing local-only
-// entries or resurrecting entries that were deliberately deleted.
-function mergeRemote(remote) {
-  if (!remote) return;
-
-  const delSet = new Set([...(STATE.deletedEngineers||[]), ...(remote.deletedEngineers||[])].map(n=>n.toLowerCase()));
-
-  const engMap = {};
-  STATE.engineers.forEach(e=>{ if (!delSet.has(e.name.toLowerCase())) engMap[e.name.toLowerCase()] = e; });
-  (remote.engineers||[]).forEach(e=>{
-    const k = e.name.toLowerCase();
-    if (!delSet.has(k) && !engMap[k]) engMap[k] = e;
+// POST /engineers — upsert a single engineer (add, edit, or soft-delete).
+async function pushEngineer(eng) {
+  const res = await fetch(`${SYNC_PROXY_URL}/engineers`, {
+    method: 'POST',
+    headers: syncHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(eng),
   });
-  STATE.engineers = Object.values(engMap);
-  STATE.deletedEngineers = Array.from(delSet);
-
-  const txMap = {};
-  STATE.transactions.forEach(t=>{ txMap[t.id] = t; });
-  (remote.transactions||[]).forEach(t=>{ if (!txMap[t.id]) txMap[t.id] = t; });
-STATE.transactions = Object.values(txMap).sort((a,b)=>
-(`${a.date||''}${a.time||''}`).localeCompare(`${b.date||''}${b.time||''}`) ||
-String(a.id||'').localeCompare(String(b.id||'')));
-
-  if (remote.settings && remote.settings.updatedAt &&
-      (!STATE.settings.updatedAt || remote.settings.updatedAt > STATE.settings.updatedAt)) {
-    STATE.settings = remote.settings;
-  }
+  if (!res.ok) throw new Error(`Engineer sync failed (${res.status})`);
+  return res.json();
 }
 
-function ghPayload() {
-  return {
-    engineers: STATE.engineers,
-    deletedEngineers: STATE.deletedEngineers,
-    transactions: STATE.transactions,
-    settings: { ...STATE.settings, updatedAt: STATE.settings.updatedAt || Date.now() },
-  };
+// POST /transactions — insert one transaction (append-only).
+async function pushTransaction(t) {
+  const res = await fetch(`${SYNC_PROXY_URL}/transactions`, {
+    method: 'POST',
+    headers: syncHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(t),
+  });
+  if (!res.ok) throw new Error(`Transaction sync failed (${res.status})`);
+  return res.json();
 }
 
-// Pull remote, merge into local state, RENDER — but never write back.
-// Used for page load and background polling so simply opening/viewing the
-// app can never modify data.json. Only explicit user actions (recording
-// usage, adding/removing an engineer, saving settings, admin actions) push
-// changes — see ghSyncNow below.
+// PUT /settings — single-row upsert.
+async function pushSettings(s) {
+  const res = await fetch(`${SYNC_PROXY_URL}/settings`, {
+    method: 'PUT',
+    headers: syncHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(s),
+  });
+  if (!res.ok) throw new Error(`Settings sync failed (${res.status})`);
+  return res.json();
+}
+
+// POST /materials — upload a new materials.xlsx: stored as a timestamped
+// file in R2 (kept forever) and set as the new "current" list for everyone.
+async function pushMaterials(parsed, filename, fileBase64) {
+  const res = await fetch(`${SYNC_PROXY_URL}/materials`, {
+    method: 'POST',
+    headers: syncHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ parsed, filename, fileBase64 }),
+  });
+  if (!res.ok) throw new Error(`Materials upload failed (${res.status})`);
+  return res.json(); // { ok, version, storedAs }
+}
+
+
+// Apply a /state payload to local STATE (server is authoritative — no local
+// merge needed since D1 already resolved everything at the row level).
+function applyState(state) {
+  STATE.engineers = (state.engineers || []).map(e => ({ name: e.name, designation: e.designation }));
+  STATE.transactions = state.transactions || [];
+  STATE.settings = state.settings || STATE.settings;
+  lastMaterialsVersion = state.materialsVersion;
+}
+
+// Pull latest state (+ materials if the version changed) and render.
+// Used for page load and background polling — READ ONLY, writes nothing.
 async function ghPullOnly(showToast) {
   if (!syncConfigured()) { setSyncBadge('local', '● LOCAL ONLY'); return; }
   if (ghSyncing) return;
@@ -159,8 +164,12 @@ async function ghPullOnly(showToast) {
   setSyncBadge('syncing', '⏳ SYNCING');
   const statusEl = document.getElementById('ghStatus');
   try {
-    const remote = await ghGetFile();
-    mergeRemote(remote.data);
+    const state = await fetchState();
+    const materialsChanged = state.materialsVersion !== lastMaterialsVersion;
+    applyState(state);
+    if (materialsChanged) {
+      STATE.materials = await fetchMaterials();
+    }
     recomputeUsed();
     save();
     renderAll();
@@ -177,107 +186,29 @@ async function ghPullOnly(showToast) {
   }
 }
 
-// Pull remote, merge, push merged result back. Retries once on write conflict.
-// Only ever called from an actual user action (add engineer, record usage,
-// save settings, admin tools) — never from page load or background polling.
-async function ghArchiveRemote(path) {
-  const res = await fetch(`${SYNC_PROXY_URL}/archive`, {
-    method: 'POST',
-    headers: { 'X-Sync-Key': SYNC_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify(path ? { path } : {}),
-  });
-  if (!res.ok) throw new Error(`Archive failed (${res.status})`);
-  return res.json(); // { archivedPath, sha }
-}
-
-async function ghSyncNow(showToast) {
-  if (!syncConfigured()) {
-    setSyncBadge('local', '● LOCAL ONLY');
-    return;
-  }
-
-  if (ghSyncing) return;
-  ghSyncing = true;
-  setSyncBadge('syncing', '⏳ SYNCING');
-
-  const statusEl = document.getElementById('ghStatus');
-
-  try {
-    let attempt = 0;
-    let lastErr = null;
-
-    while (attempt < 2) {
-      attempt++;
-
-      try {
-        const remote = await ghGetFile();
-
-        mergeRemote(remote.data);
-        recomputeUsed();
-        save();
-        renderAll();
-
-        await ghPutFile(ghPayload(), remote.sha);
-
-        lastErr = null;
-        break;
-
-      } catch (err) {
-        lastErr = err;
-        if (err.status !== 409) break;
-      }
-    }
-
-    if (lastErr) throw lastErr;
-
-    setSyncBadge('ok', '● LIVE');
-
-    if (statusEl) {
-      statusEl.textContent =
-        `✓ Synced at ${new Date().toLocaleTimeString()}`;
-      statusEl.className = 'load-status ok';
-    }
-
-    if (showToast) toast('Synced ✓', 'ok');
-
-  } catch (err) {
-    console.warn('Sync error', err);
-
-    setSyncBadge('err', '✖ SYNC ERROR');
-
-    if (statusEl) {
-      statusEl.textContent = `Error: ${err.message}`;
-      statusEl.className = 'load-status err';
-    }
-
-    if (showToast) toast('Sync failed', 'err');
-
-  } finally {
-    ghSyncing = false;
-  }
-}
-
-// Lightweight pull-only check, used for background polling so other devices'
-// entries show up here without needing a local edit to trigger a sync.
+// Background poll — same as ghPullOnly but quiet and only re-renders if
+// something actually changed, so it doesn't interrupt anyone mid-typing.
 async function ghPollOnce() {
   if (!syncConfigured() || ghSyncing) return;
   try {
-    const remote = await ghGetFile();
-    const before = JSON.stringify([STATE.engineers, STATE.transactions, STATE.deletedEngineers]);
-    mergeRemote(remote.data);
-    const after = JSON.stringify([STATE.engineers, STATE.transactions, STATE.deletedEngineers]);
-    if (before !== after) { recomputeUsed(); save(); renderAll(); toast('New data synced','ok'); }
+    const state = await fetchState();
+    const before = JSON.stringify([STATE.engineers, STATE.transactions, STATE.settings, lastMaterialsVersion]);
+    const materialsChanged = state.materialsVersion !== lastMaterialsVersion;
+    applyState(state);
+    if (materialsChanged) STATE.materials = await fetchMaterials();
+    const after = JSON.stringify([STATE.engineers, STATE.transactions, STATE.settings, lastMaterialsVersion]);
+    if (before !== after) { recomputeUsed(); save(); renderAll(); toast('New data synced', 'ok'); }
     setSyncBadge('ok', '● LIVE');
-  } catch(err) {
+  } catch (err) {
     setSyncBadge('err', '✖ SYNC ERROR');
   }
 }
 
 // Sync is fully automatic — every device that loads the site talks to the
-// same Worker proxy with no per-device setup or token entry required.
-// Loading the page and polling are READ-ONLY (see ghPullOnly) — data.json
-// is only ever written when a real action happens (recording usage,
-// adding/removing an engineer, saving settings) or via Admin Settings.
+// same Worker with no per-device setup or token entry required. Loading
+// the page and polling are READ-ONLY. Writes only happen from real user
+// actions (see pushEngineer / pushTransaction / pushSettings / pushMaterials
+// call sites) or from Admin Settings' clear actions.
 function initGitHubSync() {
   clearInterval(ghPollTimer);
   if (syncConfigured()) {
@@ -348,8 +279,14 @@ function parseExcel(file, onDone) {
 }
 
 /* ── AUTO-LOAD materials.xlsx FROM REPO ──────────────────────────────────── */
+/* ── LOCAL FALLBACK materials.xlsx ────────────────────────────────────────
+   Cloudflare (R2, via the Worker) is the source of truth for materials once
+   configured — see fetchMaterials()/ghPullOnly(). This bundled file is only
+   a read-only fallback for first-time use before Cloudflare is set up; the
+   app never writes back to it or to the GitHub repo. */
 async function tryAutoLoad() {
   if (Object.keys(STATE.materials).length > 0) return; // already have data
+  if (syncConfigured()) return; // Cloudflare is the source of truth once configured
   try {
     const res = await fetch('materials.xlsx');
     if (!res.ok) return;
@@ -786,11 +723,12 @@ function submitUsage() {
   const stockBefore = avail;
   const stockAfter  = avail - qty;
 
-  STATE.transactions.push({
+  const newTxn = {
     id: uid(), date, time: nowTime(),
     engineer: eng, cat, desc, spec, uom, qty,
     stockBefore, stockAfter, remarks: rem,
-  });
+  };
+  STATE.transactions.push(newTxn);
 
   recomputeUsed();
   save();
@@ -804,7 +742,9 @@ function submitUsage() {
   toast(`Issued ${fmt(qty)} ${uom} · ${desc}`, 'ok');
   setTimeout(()=>{ msg.textContent=''; msg.className='form-msg'; }, 4000);
 
-  ghSyncNow(false); // push the new transaction to GitHub so other devices see it
+  if (syncConfigured()) {
+    pushTransaction(newTxn).catch(err => toast('Saved locally, but failed to sync: ' + err.message, 'err'));
+  }
 }
 
 function renderTodayTable() {
@@ -954,13 +894,12 @@ function renderSettings() {
       const idx = parseInt(btn.dataset.idx);
       const removed = STATE.engineers[idx];
       STATE.engineers.splice(idx,1);
-      if (removed) {
-        const key = removed.name.toLowerCase();
-        if (!STATE.deletedEngineers.includes(key)) STATE.deletedEngineers.push(key);
-      }
       save(); renderSettings();
       toast('Engineer removed');
-      ghSyncNow(false);
+      if (removed && syncConfigured()) {
+        pushEngineer({ name: removed.name, designation: removed.designation, deleted: true })
+          .catch(err => toast('Removed locally, but failed to sync: ' + err.message, 'err'));
+      }
     });
   });
 
@@ -979,20 +918,30 @@ function addEngineer() {
     toast('Engineer already exists','err'); return;
   }
   STATE.engineers.push({ name, designation: desig });
-  // if this name was previously deleted, un-delete it
-  STATE.deletedEngineers = STATE.deletedEngineers.filter(n=>n!==name.toLowerCase());
   save(); renderSettings();
   document.getElementById('newEngName').value='';
   document.getElementById('newEngDesig').value='';
   toast(`${name} added ✓`,'ok');
-  ghSyncNow(false);
+  if (syncConfigured()) {
+    pushEngineer({ name, designation: desig, deleted: false })
+      .catch(err => toast('Saved locally, but failed to sync: ' + err.message, 'err'));
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 function handleExcelUpload(file, statusId) {
   const statusEl = document.getElementById(statusId);
   statusEl.textContent = 'Reading file…';
   statusEl.className='load-status';
-  parseExcel(file, (err, result)=>{
+  parseExcel(file, async (err, result)=>{
     if (err) {
       statusEl.textContent = `Error: ${err.message}`;
       statusEl.className = 'load-status err';
@@ -1008,6 +957,22 @@ function handleExcelUpload(file, statusId) {
     statusEl.className = 'load-status ok';
     renderAll();
     toast(`Loaded ${total} materials ✓`, 'ok');
+
+    if (syncConfigured()) {
+      try {
+        statusEl.textContent = 'Uploading to Cloudflare…';
+        const fileBase64 = await fileToBase64(file);
+        const res = await pushMaterials(result, file.name, fileBase64);
+        lastMaterialsVersion = res.version;
+        statusEl.textContent = `✓ Loaded ${total} materials · saved to Cloudflare — visible on every device`;
+        statusEl.className = 'load-status ok';
+        toast('Materials synced to all devices ✓', 'ok');
+      } catch (upErr) {
+        statusEl.textContent = `Loaded locally, but Cloudflare upload failed: ${upErr.message}`;
+        statusEl.className = 'load-status err';
+        toast('Materials loaded here, but not synced', 'err');
+      }
+    }
   });
 }
 
@@ -1052,41 +1017,34 @@ function initAdminPanel() {
   document.getElementById('adminLockBtn').onclick = () => { adminUnlocked = false; refreshLockUI(); };
 
   // Clear ALL data — materials, transactions, engineers, settings.
-  // This is the ONLY action in the whole app allowed to wipe/overwrite
-  // data.json outright. It first archives the current contents to a new,
-  // separately-named file in the repo (archive/data-cleared-<timestamp>.json)
-  // so nothing is ever lost, then writes the cleared state.
+  // This is the ONLY action in the whole app allowed to wipe the database.
+  // The Worker archives a full snapshot to a brand-new timestamped file in
+  // Cloudflare R2 (archive/data-cleared-<timestamp>.json) before deleting
+  // anything, so nothing is ever permanently lost.
   document.getElementById('adminClearAllBtn').onclick = async () => {
-    if (!confirm('This permanently deletes ALL materials, transactions, and engineers on this device (and every synced device). The current data will be archived to a separate backup file first. Continue?')) return;
+    if (!confirm('This permanently deletes ALL materials, transactions, and engineers — on every device. The current data will be archived to a separate backup file first. Continue?')) return;
     if (!confirm('Are you absolutely sure? This cannot be undone.')) return;
 
-    let archivedPath = null;
-    try {
-      if (syncConfigured()) {
-        toast('Archiving current data…', 'ok');
-        const archiveRes = await ghArchiveRemote();
-        archivedPath = archiveRes.archivedPath;
-      }
-    } catch (err) {
-      if (!confirm(`Could not archive current data first (${err.message}). Continue clearing anyway without a backup?`)) return;
+    if (!syncConfigured()) {
+      toast('Cloudflare sync not configured — nothing to clear on the server', 'err');
+      return;
     }
-
-    STATE.materials = {};
-    STATE.transactions = [];
-    STATE.deletedEngineers = [...STATE.engineers.map(e=>e.name.toLowerCase()), ...STATE.deletedEngineers];
-    STATE.engineers = [];
-    STATE.settings = { reorderPct: 20, updatedAt: Date.now() };
-    save();
-    renderAll();
-
     try {
-      if (syncConfigured()) {
-        const remote = await ghGetFile(); // latest sha, to safely overwrite
-        await ghPutFile(ghPayload(), remote.sha);
-      }
-      toast(archivedPath ? `All data cleared — backup saved to ${archivedPath} ✓` : 'All data cleared ✓', 'ok');
+      toast('Archiving and clearing…', 'ok');
+      const res = await fetch(`${SYNC_PROXY_URL}/admin/clear-all`, { method: 'POST', headers: syncHeaders() });
+      if (!res.ok) throw new Error(`Clear failed (${res.status})`);
+      const { archivedPath } = await res.json();
+
+      STATE.materials = {};
+      STATE.transactions = [];
+      STATE.engineers = [];
+      STATE.settings = { reorderPct: 20, updatedAt: Date.now() };
+      lastMaterialsVersion = -1;
+      save();
+      renderAll();
+      toast(`All data cleared — backup saved to ${archivedPath} ✓`, 'ok');
     } catch (err) {
-      toast('Data cleared locally, but failed to push to server: ' + err.message, 'err');
+      toast('Clear failed: ' + err.message, 'err');
     }
   };
 
@@ -1094,32 +1052,23 @@ function initAdminPanel() {
   document.getElementById('adminClearTxnBtn').onclick = async () => {
     if (!confirm('Clear all recorded usage/transactions? Materials and engineers stay. This cannot be undone.')) return;
 
-    let archivedPath = null;
-    try {
-      if (syncConfigured()) {
-        toast('Archiving current data…', 'ok');
-        const archiveRes = await ghArchiveRemote();
-        archivedPath = archiveRes.archivedPath;
-      }
-    } catch (err) {
-      if (!confirm(`Could not archive current data first (${err.message}). Continue clearing anyway without a backup?`)) return;
+    if (!syncConfigured()) {
+      toast('Cloudflare sync not configured — nothing to clear on the server', 'err');
+      return;
     }
-
-    STATE.transactions = [];
-    recomputeUsed();
-    save();
-    renderAll();
-
     try {
-      if (syncConfigured()) {
-        // Direct overwrite (no merge) — merging here would pull the old
-        // transactions straight back from the server and undo the clear.
-        const remote = await ghGetFile();
-        await ghPutFile(ghPayload(), remote.sha);
-      }
-      toast(archivedPath ? `Transactions cleared — backup saved to ${archivedPath} ✓` : 'Transactions cleared ✓', 'ok');
+      toast('Archiving and clearing…', 'ok');
+      const res = await fetch(`${SYNC_PROXY_URL}/admin/clear-transactions`, { method: 'POST', headers: syncHeaders() });
+      if (!res.ok) throw new Error(`Clear failed (${res.status})`);
+      const { archivedPath } = await res.json();
+
+      STATE.transactions = [];
+      recomputeUsed();
+      save();
+      renderAll();
+      toast(`Transactions cleared — backup saved to ${archivedPath} ✓`, 'ok');
     } catch (err) {
-      toast('Cleared locally, but failed to push to server: ' + err.message, 'err');
+      toast('Clear failed: ' + err.message, 'err');
     }
   };
 
@@ -1129,7 +1078,6 @@ function initAdminPanel() {
       materials: STATE.materials,
       transactions: STATE.transactions,
       engineers: STATE.engineers,
-      deletedEngineers: STATE.deletedEngineers,
       settings: STATE.settings,
       exportedAt: new Date().toISOString(),
     };
@@ -1141,25 +1089,38 @@ function initAdminPanel() {
     toast('Backup downloaded', 'ok');
   };
 
-  // Import/restore a previously exported backup
+  // Import/restore a previously exported backup — pushes every row back up
+  // to the Cloudflare database/R2 so the restore applies to every device.
   document.getElementById('adminImportInput').onchange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (!confirm('Restoring a backup replaces all current data on this device. Continue?')) { e.target.value=''; return; }
+    if (!confirm('Restoring a backup replaces all current data everywhere. Continue?')) { e.target.value=''; return; }
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const backup = JSON.parse(reader.result);
         STATE.materials = backup.materials || {};
         STATE.transactions = backup.transactions || [];
         STATE.engineers = backup.engineers || [];
-        STATE.deletedEngineers = backup.deletedEngineers || [];
         STATE.settings = backup.settings || { reorderPct: 20 };
         recomputeUsed();
         save();
         renderAll();
-        toast('Backup restored ✓', 'ok');
-        ghSyncNow(false);
+        toast('Backup restored locally ✓ — pushing to server…', 'ok');
+
+        if (syncConfigured()) {
+          for (const eng of STATE.engineers) {
+            await pushEngineer({ name: eng.name, designation: eng.designation, deleted: false });
+          }
+          for (const t of STATE.transactions) {
+            await pushTransaction(t);
+          }
+          await pushSettings(STATE.settings);
+          if (Object.keys(STATE.materials).length) {
+            await pushMaterials(STATE.materials, 'restored-backup.json', null);
+          }
+          toast('Backup pushed to server — visible on every device ✓', 'ok');
+        }
       } catch (err) {
         toast('Invalid backup file', 'err');
       }
@@ -1254,7 +1215,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
     STATE.settings.reorderPct = parseInt(document.getElementById('reorderPct').value) || 20;
     STATE.settings.updatedAt = Date.now();
     save(); renderAll(); toast('Settings saved ✓','ok');
-    ghSyncNow(false);
+    if (syncConfigured()) {
+      pushSettings(STATE.settings).catch(err => toast('Saved locally, but failed to sync: ' + err.message, 'err'));
+    }
   });
 
   // Sync status (fully automatic — nothing for the user to configure)
