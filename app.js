@@ -714,6 +714,11 @@ let usageCart = [];              // [{cat,desc,spec,uom,avail,qty}] — items st
 let usageSelection = new Map();  // key -> material item — checked in the search dropdown, not yet added
 
 function usageItemKey(cat, desc, spec) { return `${cat}||${desc}||${spec}`; }
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
 
 function renderUsagePage() {
   // Set today's date
@@ -747,14 +752,14 @@ function searchUsageMaterials(q) {
     return;
   }
 
-  results.innerHTML = matches.map(i=>{
+  results.innerHTML = matches.map((i, idx)=>{
     const key     = usageItemKey(i.cat, i.desc, i.spec);
     const checked = usageSelection.has(key);
     const already = usageCart.some(c=>usageItemKey(c.cat,c.desc,c.spec)===key);
-    return `<label class="usage-search-row${already?' disabled':''}" data-key="${key}">
+    return `<label class="usage-search-row${already?' disabled':''}" data-idx="${idx}">
       <input type="checkbox" ${checked?'checked':''} ${already?'disabled':''} />
-      <span class="usage-search-text">${i.desc} | ${i.spec ? i.spec : '— No spec —'}</span>
-      <span class="usage-search-meta">${fmt(available(i))} ${i.uom} avail${already?' · already added':''}</span>
+      <span class="usage-search-text">${escapeHtml(i.desc)} | ${i.spec ? escapeHtml(i.spec) : '— No spec —'}</span>
+      <span class="usage-search-meta">${fmt(available(i))} ${escapeHtml(i.uom)} avail${already?' · already added':''}</span>
     </label>`;
   }).join('');
   results.classList.add('open');
@@ -762,14 +767,16 @@ function searchUsageMaterials(q) {
   results.querySelectorAll('.usage-search-row:not(.disabled)').forEach(row=>{
     row.addEventListener('click', e=>{
       e.preventDefault();
-      const key = row.dataset.key;
+      const item = matches[parseInt(row.dataset.idx, 10)];
+      if (!item) return;
+      const key = usageItemKey(item.cat, item.desc, item.spec);
       const cb  = row.querySelector('input');
       if (usageSelection.has(key)) {
         usageSelection.delete(key);
         cb.checked = false;
       } else {
-        const item = matches.find(m=>usageItemKey(m.cat,m.desc,m.spec)===key);
-        if (item) { usageSelection.set(key, item); cb.checked = true; }
+        usageSelection.set(key, item);
+        cb.checked = true;
       }
       document.getElementById('addSelectedMaterials').disabled = usageSelection.size === 0;
     });
