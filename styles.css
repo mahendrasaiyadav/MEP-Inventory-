@@ -474,6 +474,45 @@ code {
 .form-msg.ok  { color: var(--green); }
 .form-msg.err { color: var(--red);   }
 
+/* ── RECORD USAGE — SEARCH & CART ──────────────────────────────────────── */
+.usage-search-group { position: relative; margin-top: 16px; }
+.usage-search-box { position: relative; }
+.usage-search-box input {
+  width: 100%; padding: 10px 12px; background: var(--surface3);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 14px;
+}
+.usage-search-box input:focus { outline: none; border-color: var(--accent); background: var(--surface2); }
+.usage-search-results {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  max-height: 280px; overflow-y: auto; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 12px 28px rgba(0,0,0,.35);
+}
+.usage-search-results.open { display: block; }
+.usage-search-empty { padding: 14px; font-size: 13px; color: var(--text-muted); }
+.usage-search-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-top: 1px solid var(--border); cursor: pointer; font-size: 13px;
+}
+.usage-search-row:first-child { border-top: none; }
+.usage-search-row:hover { background: var(--surface3); }
+.usage-search-row.disabled { opacity: .45; cursor: not-allowed; }
+.usage-search-row input[type="checkbox"] { flex-shrink: 0; width: 15px; height: 15px; accent-color: var(--accent); }
+.usage-search-text { flex: 1; color: var(--text); }
+.usage-search-meta { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
+
+.cart-qty-input {
+  width: 100px; padding: 6px 8px; text-align: right; font-size: 13px;
+  background: var(--surface3); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+}
+.cart-qty-input:focus { outline: none; border-color: var(--accent); }
+.cart-remove-btn {
+  background: none; border: none; color: var(--text-dim); font-size: 14px;
+  cursor: pointer; padding: 4px 6px; border-radius: 6px; transition: color .15s, background .15s;
+}
+.cart-remove-btn:hover { color: var(--red); background: rgba(239,68,68,.1); }
+
 /* ── BUTTONS ────────────────────────────────────────────────────────────── */
 .btn-primary {
   padding: 9px 20px;

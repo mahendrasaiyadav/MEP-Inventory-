@@ -429,8 +429,8 @@ function renderDashboard() {
     { icon:'⚠️', value: stats.low + stats.crit, label:'Low / Critical',
       sub:`${stats.crit} critical, ${stats.low} low`, accent:'var(--red)',
       nav: ()=> { showPage('dashboard'); setTimeout(()=>document.getElementById('lowStockSection')?.scrollIntoView({behavior:'smooth',block:'start'}), 50); } },
-    { icon:'📅', value: txToday.reduce((s,t)=>s+t.qty,0), label:"Today's Issues",
-      sub:`${txToday.length} transactions`, accent:'var(--orange)',
+    { icon:'📅', value: txToday.length, label:"Today's Issues",
+      sub:`${fmt(txToday.reduce((s,t)=>s+t.qty,0))} total qty`, accent:'var(--orange)',
       nav: ()=> showPage('usage') },
     { icon:'👷', value: STATE.engineers.length, label:'Engineers',
       sub:'Active team members', accent:'#06b6d4',
@@ -686,7 +686,35 @@ function filterOverview() {
     : `<tr><td colspan="8" class="empty-state">No materials found</td></tr>`;
 }
 
+// Downloads every material, one sheet per category, matching the
+// S.No | Material Description | Specification | UOM | Physical Qty |
+// Used Qty | Available Qty layout of the source materials.xlsx.
+function downloadOverviewExcel() {
+  const wb = XLSX.utils.book_new();
+  Object.keys(STATE.materials).forEach(cat=>{
+    const items = STATE.materials[cat];
+    const rows = [
+      ['S.No','Material Description','Specification','UOM','Physical Qty','Used Qty','Available Qty']
+    ];
+    items.forEach((i, idx)=>{
+      rows.push([idx+1, i.desc, i.spec||'', i.uom||'', i.physicalQty, i.used||0, available(i)]);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:6},{wch:32},{wch:22},{wch:8},{wch:14},{wch:12},{wch:14}];
+    // Sheet names max 31 chars, no special chars
+    const sheetName = cat.replace(/[\\/?*[\]:]/g,'').slice(0,31) || 'Sheet';
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+  if (!wb.SheetNames.length) { toast('No materials to export', 'err'); return; }
+  XLSX.writeFile(wb, `mep-materials-${today()}.xlsx`);
+}
+
 /* ── USAGE PAGE ──────────────────────────────────────────────────────────── */
+let usageCart = [];              // [{cat,desc,spec,uom,avail,qty}] — items staged to issue
+let usageSelection = new Map();  // key -> material item — checked in the search dropdown, not yet added
+
+function usageItemKey(cat, desc, spec) { return `${cat}||${desc}||${spec}`; }
+
 function renderUsagePage() {
   // Set today's date
   const dateEl = document.getElementById('usageDate');
@@ -698,129 +726,166 @@ function renderUsagePage() {
   engSel.innerHTML = '<option value="">— Select Engineer —</option>' +
     STATE.engineers.map(e=>`<option value="${e.name}" ${e.name===engVal?'selected':''}>${e.name}</option>`).join('');
 
-  // Populate category dropdown
-  const catSel = document.getElementById('usageCategory');
-  const catVal = catSel.value;
-  catSel.innerHTML = '<option value="">— Select Category —</option>' +
-    Object.keys(STATE.materials).map(c=>`<option value="${c}" ${c===catVal?'selected':''}>${c}</option>`).join('');
-
+  renderUsageCart();
   renderTodayTable();
 }
 
-function updateMaterialDropdown() {
-  const cat = document.getElementById('usageCategory').value;
-  const matSel = document.getElementById('usageMaterial');
-  matSel.innerHTML = '<option value="">— Select Material —</option>';
-  resetSpecDropdown('— Select Material first —');
-  if (!cat || !STATE.materials[cat]) return;
-  const unique = {};
-  STATE.materials[cat].forEach(item=>{
-    if (!unique[item.desc]) unique[item.desc] = item;
-  });
-  Object.keys(unique).forEach(desc=>{
-    const opt = document.createElement('option');
-    opt.value = desc; opt.textContent = desc;
-    matSel.appendChild(opt);
-  });
-}
+// Search box → shows a checkbox list of matching Material | Specification
+// combinations across every category, similar to a typeahead multi-picker.
+function searchUsageMaterials(q) {
+  q = q.trim().toLowerCase();
+  const results = document.getElementById('usageSearchResults');
+  if (!q) { results.innerHTML = ''; results.classList.remove('open'); return; }
 
-function resetSpecDropdown(placeholder) {
-  const specSel = document.getElementById('usageSpec');
-  specSel.innerHTML = `<option value="">${placeholder}</option>`;
-  document.getElementById('usageUOM').value = '';
-  document.getElementById('usageAvailable').value = '';
-}
+  const matches = allMaterials().filter(i=>
+    i.desc.toLowerCase().includes(q) || (i.spec||'').toLowerCase().includes(q)
+  ).slice(0, 50);
 
-// A material with a blank specification would otherwise share the same
-// (empty) option value as the "please select" placeholder — use a sentinel
-// so it's still a distinct, selectable choice.
-const SPEC_NONE = '__NONE__';
-function specEncode(spec) { return spec === '' ? SPEC_NONE : spec; }
-function specDecode(val)  { return val === SPEC_NONE ? '' : val; }
+  if (!matches.length) {
+    results.innerHTML = `<div class="usage-search-empty">No materials match "${q}"</div>`;
+    results.classList.add('open');
+    return;
+  }
 
-// Material Description chosen → only show the Specifications that belong to
-// that material name, so the engineer explicitly picks the right one.
-function updateSpecDropdown() {
-  const cat  = document.getElementById('usageCategory').value;
-  const desc = document.getElementById('usageMaterial').value;
-  resetSpecDropdown('— Select Specification —');
-  if (!cat || !desc || !STATE.materials[cat]) return;
-  const specs = STATE.materials[cat].filter(i=>i.desc===desc);
-  const specSel = document.getElementById('usageSpec');
-  specs.forEach(item=>{
-    const opt = document.createElement('option');
-    opt.value = specEncode(item.spec);
-    opt.textContent = item.spec ? `${item.spec}  (${fmt(available(item))} ${item.uom} avail)` : `— No spec —  (${fmt(available(item))} ${item.uom} avail)`;
-    specSel.appendChild(opt);
+  results.innerHTML = matches.map(i=>{
+    const key     = usageItemKey(i.cat, i.desc, i.spec);
+    const checked = usageSelection.has(key);
+    const already = usageCart.some(c=>usageItemKey(c.cat,c.desc,c.spec)===key);
+    return `<label class="usage-search-row${already?' disabled':''}" data-key="${key}">
+      <input type="checkbox" ${checked?'checked':''} ${already?'disabled':''} />
+      <span class="usage-search-text">${i.desc} | ${i.spec ? i.spec : '— No spec —'}</span>
+      <span class="usage-search-meta">${fmt(available(i))} ${i.uom} avail${already?' · already added':''}</span>
+    </label>`;
+  }).join('');
+  results.classList.add('open');
+
+  results.querySelectorAll('.usage-search-row:not(.disabled)').forEach(row=>{
+    row.addEventListener('click', e=>{
+      e.preventDefault();
+      const key = row.dataset.key;
+      const cb  = row.querySelector('input');
+      if (usageSelection.has(key)) {
+        usageSelection.delete(key);
+        cb.checked = false;
+      } else {
+        const item = matches.find(m=>usageItemKey(m.cat,m.desc,m.spec)===key);
+        if (item) { usageSelection.set(key, item); cb.checked = true; }
+      }
+      document.getElementById('addSelectedMaterials').disabled = usageSelection.size === 0;
+    });
   });
 }
 
-// Specification chosen → auto-fill the read-only UOM / Available Stock fields
-function updateUOMAvailFromSpec() {
-  const cat  = document.getElementById('usageCategory').value;
-  const desc = document.getElementById('usageMaterial').value;
-  const spec = specDecode(document.getElementById('usageSpec').value);
-  document.getElementById('usageUOM').value = '';
-  document.getElementById('usageAvailable').value = '';
-  if (!cat || !desc || !STATE.materials[cat]) return;
-  const item = STATE.materials[cat].find(i=>i.desc===desc && i.spec===spec);
-  if (!item) return;
-  document.getElementById('usageUOM').value = item.uom || '';
-  document.getElementById('usageAvailable').value = fmt(available(item));
+// Moves every checked search result into the staging cart below.
+function addSelectedToCart() {
+  usageSelection.forEach(item=>{
+    const key = usageItemKey(item.cat, item.desc, item.spec);
+    if (usageCart.some(c=>usageItemKey(c.cat,c.desc,c.spec)===key)) return;
+    usageCart.push({ cat:item.cat, desc:item.desc, spec:item.spec, uom:item.uom, avail:available(item), qty:'' });
+  });
+  usageSelection.clear();
+  const input   = document.getElementById('usageSearchInput');
+  const results = document.getElementById('usageSearchResults');
+  input.value = '';
+  results.innerHTML = '';
+  results.classList.remove('open');
+  document.getElementById('addSelectedMaterials').disabled = true;
+  renderUsageCart();
+}
+
+function renderUsageCart() {
+  const body = document.getElementById('usageCartBody');
+  if (!usageCart.length) {
+    body.innerHTML = `<tr><td colspan="6" class="empty-state">Search above and add materials to issue</td></tr>`;
+    return;
+  }
+  body.innerHTML = usageCart.map((c,idx)=>`<tr>
+    <td>${c.desc}</td>
+    <td style="color:var(--text-muted)">${c.spec||'—'}</td>
+    <td>${c.uom||''}</td>
+    <td class="num">${fmt(c.avail)}</td>
+    <td class="num"><input type="number" class="cart-qty-input" min="0.01" step="any" data-idx="${idx}" value="${c.qty}" placeholder="Qty" /></td>
+    <td><button type="button" class="cart-remove-btn" data-idx="${idx}" title="Remove">✕</button></td>
+  </tr>`).join('');
+
+  body.querySelectorAll('.cart-qty-input').forEach(inp=>{
+    inp.addEventListener('input', ()=>{ usageCart[parseInt(inp.dataset.idx)].qty = inp.value; });
+  });
+  body.querySelectorAll('.cart-remove-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      usageCart.splice(parseInt(btn.dataset.idx), 1);
+      renderUsageCart();
+    });
+  });
 }
 
 function submitUsage() {
-  const date   = document.getElementById('usageDate').value;
-  const eng    = document.getElementById('usageEngineer').value;
-  const cat    = document.getElementById('usageCategory').value;
-  const desc   = document.getElementById('usageMaterial').value;
-  const specRaw= document.getElementById('usageSpec').value;
-  const spec   = specDecode(specRaw);
-  const uom    = document.getElementById('usageUOM').value;
-  const qtyStr = document.getElementById('usageQty').value;
-  const rem    = document.getElementById('usageRemarks').value.trim();
-  const msg    = document.getElementById('formMsg');
+  const date = document.getElementById('usageDate').value;
+  const eng  = document.getElementById('usageEngineer').value;
+  const rem  = document.getElementById('usageRemarks').value.trim();
+  const msg  = document.getElementById('formMsg');
 
-  if (!date)   { msg.textContent='Please select a date.';       msg.className='form-msg err'; return; }
-  if (!eng)    { msg.textContent='Please select an engineer.';  msg.className='form-msg err'; return; }
-  if (!cat)    { msg.textContent='Please select a category.';   msg.className='form-msg err'; return; }
-  if (!desc)   { msg.textContent='Please select a material.';   msg.className='form-msg err'; return; }
-  if (!specRaw) { msg.textContent='Please select a specification.'; msg.className='form-msg err'; return; }
-  const qty = parseFloat(qtyStr);
-  if (!qty || qty <= 0) { msg.textContent='Enter a valid quantity > 0.'; msg.className='form-msg err'; return; }
+  if (!date) { msg.textContent='Please select a date.';      msg.className='form-msg err'; return; }
+  if (!eng)  { msg.textContent='Please select an engineer.'; msg.className='form-msg err'; return; }
+  if (!usageCart.length) { msg.textContent='Add at least one material to issue.'; msg.className='form-msg err'; return; }
 
-  // Find item and deduct
-  const items = STATE.materials[cat];
-  const idx   = items.findIndex(i=>i.desc===desc && i.spec===spec);
-  if (idx === -1) { msg.textContent='Material / specification not found.'; msg.className='form-msg err'; return; }
-  const item = items[idx];
-  const avail = available(item);
+  const toIssue = [];
+  for (const c of usageCart) {
+    const qty = parseFloat(c.qty);
+    if (!qty || qty <= 0) {
+      msg.textContent = `Enter a valid quantity for ${c.desc}${c.spec?' ('+c.spec+')':''}.`;
+      msg.className = 'form-msg err';
+      return;
+    }
+    toIssue.push({ ...c, qty });
+  }
 
-  const stockBefore = avail;
-  const stockAfter  = avail - qty;
-
-  const newTxn = {
-    id: uid(), date, time: nowTime(),
-    engineer: eng, cat, desc, spec, uom, qty,
-    stockBefore, stockAfter, remarks: rem,
-  };
-  STATE.transactions.push(newTxn);
+  const newTxns = [];
+  toIssue.forEach(c=>{
+    const items = STATE.materials[c.cat];
+    const idx = items ? items.findIndex(i=>i.desc===c.desc && i.spec===c.spec) : -1;
+    if (idx === -1) return;
+    const item  = items[idx];
+    const avail = available(item);
+    const newTxn = {
+      id: uid(), date, time: nowTime(),
+      engineer: eng, cat:c.cat, desc:c.desc, spec:c.spec, uom:c.uom, qty:c.qty,
+      stockBefore: avail, stockAfter: avail - c.qty, remarks: rem,
+    };
+    STATE.transactions.push(newTxn);
+    newTxns.push(newTxn);
+  });
 
   recomputeUsed();
   save();
-  msg.textContent = `✓ Issued ${fmt(qty)} ${uom} of ${desc} to ${eng}`;
-  msg.className = 'form-msg ok';
-  document.getElementById('usageQty').value = '';
-  document.getElementById('usageRemarks').value = '';
-  document.getElementById('usageAvailable').value = fmt(available(item));
 
+  msg.textContent = `✓ Issued ${newTxns.length} material${newTxns.length===1?'':'s'} to ${eng}`;
+  msg.className = 'form-msg ok';
+  toast(`Issued ${newTxns.length} material${newTxns.length===1?'':'s'} to ${eng}`, 'ok');
+
+  usageCart = [];
+  document.getElementById('usageEngineer').value = '';
+  document.getElementById('usageRemarks').value  = '';
+  renderUsageCart();
   renderTodayTable();
-  toast(`Issued ${fmt(qty)} ${uom} · ${desc}`, 'ok');
   setTimeout(()=>{ msg.textContent=''; msg.className='form-msg'; }, 4000);
 
   if (syncConfigured()) {
-    pushTransaction(newTxn).catch(err => toast('Saved locally, but failed to sync: ' + err.message, 'err'));
+    newTxns.forEach(t => pushTransaction(t).catch(err => toast('Saved locally, but failed to sync: ' + err.message, 'err')));
   }
+}
+
+function clearUsageForm() {
+  usageCart = [];
+  usageSelection.clear();
+  document.getElementById('usageEngineer').value = '';
+  document.getElementById('usageRemarks').value  = '';
+  document.getElementById('usageSearchInput').value = '';
+  document.getElementById('usageSearchResults').innerHTML = '';
+  document.getElementById('usageSearchResults').classList.remove('open');
+  document.getElementById('addSelectedMaterials').disabled = true;
+  document.getElementById('formMsg').textContent = '';
+  renderUsageCart();
 }
 
 function renderTodayTable() {
@@ -892,7 +957,6 @@ function applyEngFilter() {
       <div class="eng-card-desig">${e.designation||'Engineer'}</div>
       <div class="eng-stats">
         <div><div class="eng-stat-val">${d.txns}</div><div class="eng-stat-label">Issues</div></div>
-        <div><div class="eng-stat-val">${fmt(d.qty)}</div><div class="eng-stat-label">Qty Used</div></div>
       </div>
     </div>`;
   }).join('') || `<div class="empty-state">No engineers added yet — go to Settings to add them.</div>`;
@@ -1336,18 +1400,19 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
   // Overview search
   document.getElementById('overviewSearch').addEventListener('input', filterOverview);
+  document.getElementById('downloadOverviewExcel').addEventListener('click', downloadOverviewExcel);
 
-  // Usage form
-  document.getElementById('usageCategory').addEventListener('change', updateMaterialDropdown);
-  document.getElementById('usageMaterial').addEventListener('change', updateSpecDropdown);
-  document.getElementById('usageSpec').addEventListener('change', updateUOMAvailFromSpec);
-  document.getElementById('submitUsage').addEventListener('click', submitUsage);
-  document.getElementById('clearUsage').addEventListener('click', ()=>{
-    ['usageEngineer','usageCategory','usageMaterial'].forEach(id=>document.getElementById(id).value='');
-    resetSpecDropdown('— Select Material first —');
-    ['usageQty','usageRemarks'].forEach(id=>document.getElementById(id).value='');
-    document.getElementById('formMsg').textContent='';
+  // Usage form — search + multi-add + issue-all
+  document.getElementById('usageSearchInput').addEventListener('input', e=> searchUsageMaterials(e.target.value));
+  document.getElementById('usageSearchInput').addEventListener('focus', e=> searchUsageMaterials(e.target.value));
+  document.addEventListener('click', e=>{
+    if (!e.target.closest('.usage-search-group')) {
+      document.getElementById('usageSearchResults').classList.remove('open');
+    }
   });
+  document.getElementById('addSelectedMaterials').addEventListener('click', addSelectedToCart);
+  document.getElementById('submitUsage').addEventListener('click', submitUsage);
+  document.getElementById('clearUsage').addEventListener('click', clearUsageForm);
 
   // Engineer reports
   document.getElementById('applyFilter').addEventListener('click', applyEngFilter);

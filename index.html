@@ -114,6 +114,7 @@
         <input type="text" class="search-box" id="overviewSearch" placeholder="Search material, spec…" />
       </div>
       <div class="filter-chips" id="categoryFilters"></div>
+      <button class="btn-ghost sm" id="downloadOverviewExcel" style="margin-left:auto">⬇ Download Excel</button>
     </div>
     <div class="table-card">
       <table class="data-table" id="overviewTable">
@@ -138,10 +139,10 @@
   <div class="page" id="page-usage">
     <div class="page-header">
       <h1>Record Usage</h1>
-      <p>Issue materials to engineers — stock updates instantly</p>
+      <p>Search and add multiple materials, then issue them all at once</p>
     </div>
     <div class="form-card">
-      <div class="form-grid">
+      <div class="form-grid" style="grid-template-columns:1fr 1fr;">
         <div class="form-group">
           <label>Date</label>
           <input type="date" id="usageDate" />
@@ -152,43 +153,42 @@
             <option value="">— Select Engineer —</option>
           </select>
         </div>
-        <div class="form-group">
-          <label>Category</label>
-          <select id="usageCategory">
-            <option value="">— Select Category —</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Material</label>
-          <select id="usageMaterial">
-            <option value="">— Select Category first —</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Specification</label>
-          <select id="usageSpec">
-            <option value="">— Select Material first —</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>UOM</label>
-          <input type="text" id="usageUOM" readonly placeholder="Auto-filled" />
-        </div>
-        <div class="form-group">
-          <label>Available Stock</label>
-          <input type="text" id="usageAvailable" readonly placeholder="Auto-filled" class="highlight-field" />
-        </div>
-        <div class="form-group">
-          <label>Qty Used</label>
-          <input type="number" id="usageQty" min="1" placeholder="Enter quantity" />
-        </div>
-        <div class="form-group full">
-          <label>Remarks</label>
-          <input type="text" id="usageRemarks" placeholder="Optional note…" />
-        </div>
       </div>
+
+      <div class="form-group full usage-search-group">
+        <label>Add Materials</label>
+        <div class="usage-search-box">
+          <input type="text" id="usageSearchInput" placeholder="Search for Material or specification" autocomplete="off" />
+          <div class="usage-search-results" id="usageSearchResults"></div>
+        </div>
+        <button class="btn-primary sm" id="addSelectedMaterials" style="margin-top:8px" disabled>Add Selected Materials</button>
+      </div>
+
+      <div class="table-card" style="margin:16px 0 0">
+        <table class="data-table" id="usageCartTable">
+          <thead>
+            <tr>
+              <th>Material</th>
+              <th>Specification</th>
+              <th>UOM</th>
+              <th class="num">Present Qty</th>
+              <th class="num" style="width:130px">Qty Issued</th>
+              <th style="width:36px"></th>
+            </tr>
+          </thead>
+          <tbody id="usageCartBody">
+            <tr><td colspan="6" class="empty-state">Search above and add materials to issue</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="form-group full" style="margin-top:16px">
+        <label>Remarks (applies to all items in this batch)</label>
+        <input type="text" id="usageRemarks" placeholder="Optional note…" />
+      </div>
+
       <div class="form-actions">
-        <button class="btn-primary" id="submitUsage">Issue Material</button>
+        <button class="btn-primary" id="submitUsage">Issue All Materials</button>
         <button class="btn-ghost" id="clearUsage">Clear</button>
       </div>
       <div class="form-msg" id="formMsg"></div>
